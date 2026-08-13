@@ -15,6 +15,7 @@ import {
   getConfiguredMaxWorkers,
   getConfiguredProviderRateLimits,
   getModelForProvider,
+  resolveQueueResourceKey,
   getWorkerCount,
   isRetryableGenerationError,
   loadBatchTasks,
@@ -733,6 +734,14 @@ test("Vertex uses its documented default model when no override is configured", 
   assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-preview");
   process.env.VERTEX_IMAGE_MODEL = "gemini-3-pro-image-custom";
   assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-custom");
+});
+
+test("Vertex queue setup does not require a project before the provider executes", (t) => {
+  useEnv(t, { VERTEX_PROJECT_ID: null, GOOGLE_CLOUD_PROJECT: null, VERTEX_LOCATION: null });
+  assert.equal(
+    resolveQueueResourceKey("vertex", "gemini-3.1-flash-image"),
+    "vertex:default-project|global|gemini-3.1-flash-image",
+  );
 });
 
 function makePreparedTask(

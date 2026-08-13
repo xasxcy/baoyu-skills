@@ -15,13 +15,11 @@ import type {
 import {
   acquireGlobalSlot,
   buildProviderResourceKey,
-  buildVertexResourceKey,
   computeRetryDelayMs,
   computeTaskHash,
   extractHttpStatus,
   isRateLimitError,
 } from "./global-queue";
-import { getVertexLocation, getVertexProjectId } from "./providers/google";
 
 export type ProviderModule = {
   getDefaultModel: () => string;
@@ -1073,14 +1071,7 @@ function globalQueueDisabled(): boolean {
   return v === "1" || v === "true" || v === "yes";
 }
 
-function resolveQueueResourceKey(provider: Provider, model: string): string {
-  if (provider === "vertex") {
-    return buildVertexResourceKey({
-      projectId: getVertexProjectId(),
-      location: getVertexLocation(),
-      model,
-    });
-  }
+export function resolveQueueResourceKey(provider: Provider, model: string): string {
   return buildProviderResourceKey(provider, model);
 }
 
