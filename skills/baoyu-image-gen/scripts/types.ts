@@ -1,16 +1,32 @@
-export type Provider =
-  | "google"
-  | "openai"
-  | "openrouter"
-  | "dashscope"
-  | "zai"
-  | "minimax"
-  | "replicate"
-  | "jimeng"
-  | "seedream"
-  | "azure"
-  | "codex-cli"
-  | "agnes";
+// PROVIDERS is the runtime-canonical provider list. It drives the CLI --provider
+// validation, the rate-limit Record, and the batch log loop in main.ts (see B0
+// in workspace/dev/2026-08-13-image-providers/PLAN-v3.md). Provider-specific
+// module loading and credential detection intentionally keep explicit branches
+// rather than being derived from this array.
+//
+// NOTE: this repo has no tsconfig.json / no `typescript` dependency; `tsx` only
+// transpiles, it does not type-check. The runtime assertion in main.test.ts
+// (that PROVIDERS' key set matches DEFAULT_PROVIDER_RATE_LIMITS' and
+// ExtendConfig.default_model's key sets) is the actual enforcement here — this
+// const alone gives no compile-time guarantee that every consumer stayed in sync.
+export const PROVIDERS = [
+  "google",
+  "openai",
+  "openrouter",
+  "dashscope",
+  "siliconflow",
+  "zai",
+  "minimax",
+  "replicate",
+  "jimeng",
+  "seedream",
+  "azure",
+  "codex-cli",
+  "agnes",
+  "vertex",
+] as const;
+
+export type Provider = (typeof PROVIDERS)[number];
 export type Quality = "normal" | "2k";
 export type OpenAIImageApiDialect = "openai-native" | "ratio-metadata";
 export type ResponseFormat = "file" | "url";
@@ -73,6 +89,7 @@ export type ExtendConfig = {
     openai: string | null;
     openrouter: string | null;
     dashscope: string | null;
+    siliconflow: string | null;
     zai: string | null;
     minimax: string | null;
     replicate: string | null;
@@ -81,6 +98,7 @@ export type ExtendConfig = {
     azure: string | null;
     "codex-cli": string | null;
     agnes: string | null;
+    vertex: string | null;
   };
   batch?: {
     max_workers?: number | null;

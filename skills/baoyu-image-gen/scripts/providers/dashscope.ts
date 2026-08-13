@@ -1,8 +1,8 @@
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import type { CliArgs, Quality } from "../types";
 
-type DashScopeModelFamily = "qwen2" | "qwenFixed" | "wan27" | "legacy";
+type DashScopeModelFamily = "qwen2" | "qwenFixed" | "edit" | "wan27" | "legacy";
 
 type DashScopeModelSpec = {
   family: DashScopeModelFamily;
@@ -25,6 +25,8 @@ const MIN_WAN27_TOTAL_PIXELS = 768 * 768;
 const MAX_WAN27_PRO_T2I_PIXELS = 4096 * 4096;
 const MAX_WAN27_GENERAL_PIXELS = 2048 * 2048;
 const WAN27_MAX_REFERENCE_IMAGES = 9;
+const QWEN_MAX_REFERENCE_IMAGES = 3;
+const QWEN_MAX_REFERENCE_BYTES = 10 * 1024 * 1024;
 
 const WAN27_TARGET_PIXELS: Record<Quality, number> = {
   normal: 1024 * 1024,
@@ -85,6 +87,11 @@ const QWEN_FIXED_SPEC: DashScopeModelSpec = {
   defaultSize: QWEN_FIXED_SIZES_BY_RATIO["16:9"],
 };
 
+const QWEN_EDIT_SPEC: DashScopeModelSpec = {
+  family: "edit",
+  defaultSize: "1024*1024",
+};
+
 const WAN27_SPEC: DashScopeModelSpec = {
   family: "wan27",
   defaultSize: "2048*2048",
@@ -105,6 +112,9 @@ const MODEL_SPEC_ALIASES: Record<string, DashScopeModelSpec> = {
   "qwen-image-plus": QWEN_FIXED_SPEC,
   "qwen-image-plus-2026-01-09": QWEN_FIXED_SPEC,
   "qwen-image": QWEN_FIXED_SPEC,
+  "qwen-image-edit": QWEN_EDIT_SPEC,
+  "qwen-image-edit-plus": QWEN_EDIT_SPEC,
+  "qwen-image-edit-max": QWEN_EDIT_SPEC,
   "wan2.7-image-pro": WAN27_SPEC,
   "wan2.7-image": WAN27_SPEC,
 };
@@ -113,7 +123,21 @@ export function getDefaultModel(): string {
   return process.env.DASHSCOPE_IMAGE_MODEL || DEFAULT_MODEL;
 }
 
-function getReferenceImageMime(filePath: string): string {
+function getReferenceImageMime(filePath: string, bytes: Uint8Array): string {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+    bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (bytes.length >= 12 && Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" && Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  if (bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
   const ext = path.extname(filePath).toLowerCase();
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".webp") return "image/webp";
@@ -121,13 +145,13 @@ function getReferenceImageMime(filePath: string): string {
   return "image/png";
 }
 
-async function loadReferenceImage(refPath: string): Promise<string> {
+export async function loadReferenceImage(refPath: string): Promise<string> {
   if (/^https?:\/\//i.test(refPath)) {
     return refPath;
   }
   const fullPath = path.resolve(refPath);
   const bytes = await readFile(fullPath);
-  return `data:${getReferenceImageMime(fullPath)};base64,${bytes.toString("base64")}`;
+  return `data:${getReferenceImageMime(fullPath, bytes)};base64,${bytes.toString("base64")}`;
 }
 
 function getApiKey(): string | null {
@@ -140,7 +164,15 @@ function getBaseUrl(): string {
 }
 
 function getModelSpec(model: string): DashScopeModelSpec {
-  return MODEL_SPEC_ALIASES[model.trim().toLowerCase()] || LEGACY_SPEC;
+  const normalized = model.trim().toLowerCase();
+  if (/^qwen-image-edit(?:-(?:plus|max))?(?:-\d{4}-\d{2}-\d{2})?$/.test(normalized)) {
+    return QWEN_EDIT_SPEC;
+  }
+  return MODEL_SPEC_ALIASES[normalized] || LEGACY_SPEC;
+}
+
+function isBaseQwenEditModel(model: string): boolean {
+  return /^qwen-image-edit(?:-\d{4}-\d{2}-\d{2})?$/.test(model.trim().toLowerCase());
 }
 
 export function getModelFamily(model: string): DashScopeModelFamily {
@@ -458,7 +490,7 @@ function validateQwenFixedSize(size: string): string {
 export function resolveSizeForModel(
   model: string,
   args: Pick<CliArgs, "size" | "aspectRatio" | "quality"> & { referenceImages?: string[] },
-): string {
+): string | null {
   const spec = getModelSpec(model);
   const referenceCount = args.referenceImages?.length ?? 0;
 
@@ -475,6 +507,10 @@ export function resolveSizeForModel(
     return normalizeSize(args.size);
   }
 
+  if (spec.family === "edit" && isBaseQwenEditModel(model)) {
+    return null;
+  }
+
   if (spec.family === "qwen2") {
     return getQwen2SizeFromAspectRatio(args.aspectRatio, args.quality);
   }
@@ -488,7 +524,8 @@ export function resolveSizeForModel(
 
 function buildParameters(
   family: DashScopeModelFamily,
-  size: string,
+  size: string | null,
+  model: string,
 ): Record<string, unknown> {
   if (family === "wan27") {
     return {
@@ -498,17 +535,53 @@ function buildParameters(
     };
   }
 
-  const parameters: Record<string, unknown> = {
-    prompt_extend: false,
-    size,
-  };
+  const parameters: Record<string, unknown> = {};
 
-  if (family === "qwen2" || family === "qwenFixed") {
+  if (!(family === "edit" && isBaseQwenEditModel(model))) {
+    parameters.prompt_extend = false;
+  }
+
+  if (size) parameters.size = size;
+
+  if (family === "qwen2" || family === "qwenFixed" || family === "edit") {
     parameters.watermark = false;
     parameters.negative_prompt = QWEN_NEGATIVE_PROMPT;
   }
 
   return parameters;
+}
+
+async function validateQwenReferenceImages(model: string, referenceImages: string[]): Promise<void> {
+  const family = getModelFamily(model);
+  if (family === "qwenFixed") {
+    throw new Error(
+      "DashScope qwen-image/max/plus models do not support reference images. Use --model qwen-image-2.0-pro or qwen-image-edit instead."
+    );
+  }
+  if (family === "legacy") {
+    throw new Error(
+      "Reference images are not supported with this DashScope model. Use qwen-image-2.0-pro, qwen-image-edit, or a wan2.7 image model."
+    );
+  }
+  if (family === "edit" && referenceImages.length === 0) {
+    throw new Error("DashScope qwen-image-edit models require at least one reference image.");
+  }
+  if ((family === "qwen2" || family === "edit") && referenceImages.length > QWEN_MAX_REFERENCE_IMAGES) {
+    throw new Error(
+      `DashScope ${model} accepts at most ${QWEN_MAX_REFERENCE_IMAGES} reference images. Received ${referenceImages.length}.`
+    );
+  }
+  if (family !== "qwen2" && family !== "edit") return;
+
+  for (const refPath of referenceImages) {
+    if (/^https?:\/\//i.test(refPath)) continue;
+    const info = await stat(path.resolve(refPath));
+    if (info.size > QWEN_MAX_REFERENCE_BYTES) {
+      throw new Error(
+        `DashScope reference images must be at most 10MB each. ${path.basename(refPath)} is ${info.size} bytes.`
+      );
+    }
+  }
 }
 
 type DashScopeResponse = {
@@ -562,13 +635,11 @@ export async function generateImage(
 
   const spec = getModelSpec(model);
 
-  if (args.referenceImages.length > 0 && spec.family !== "wan27") {
-    throw new Error(
-      "Reference images are not supported with this DashScope model. Use a wan2.7 image model (--model wan2.7-image-pro or wan2.7-image), or switch to --provider google with a Gemini multimodal model."
-    );
+  if (args.referenceImages.length > 0 || spec.family === "edit") {
+    await validateQwenReferenceImages(model, args.referenceImages);
   }
 
-  if (args.referenceImages.length > WAN27_MAX_REFERENCE_IMAGES) {
+  if (spec.family === "wan27" && args.referenceImages.length > WAN27_MAX_REFERENCE_IMAGES) {
     throw new Error(
       `DashScope wan2.7 image models accept at most ${WAN27_MAX_REFERENCE_IMAGES} reference images. Received ${args.referenceImages.length}.`
     );
@@ -584,7 +655,7 @@ export async function generateImage(
   const url = `${getBaseUrl()}/api/v1/services/aigc/multimodal-generation/generation`;
 
   const content: Array<Record<string, unknown>> = [];
-  if (spec.family === "wan27" && args.referenceImages.length > 0) {
+  if ((spec.family === "wan27" || spec.family === "qwen2" || spec.family === "edit") && args.referenceImages.length > 0) {
     for (const refPath of args.referenceImages) {
       content.push({ image: await loadReferenceImage(refPath) });
     }
@@ -601,7 +672,7 @@ export async function generateImage(
         },
       ],
     },
-    parameters: buildParameters(spec.family, size),
+    parameters: buildParameters(spec.family, size, model),
   };
 
   console.log(`Generating image with DashScope (${model})...`, { family: spec.family, size });

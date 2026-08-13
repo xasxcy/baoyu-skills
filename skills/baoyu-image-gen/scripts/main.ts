@@ -2,7 +2,8 @@ import path from "node:path";
 import process from "node:process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { PROVIDERS } from "./types";
 import type {
   BatchFile,
   BatchTaskInput,
@@ -11,15 +12,25 @@ import type {
   OpenAIImageApiDialect,
   Provider,
 } from "./types";
+import {
+  acquireGlobalSlot,
+  buildProviderResourceKey,
+  buildVertexResourceKey,
+  computeRetryDelayMs,
+  computeTaskHash,
+  extractHttpStatus,
+  isRateLimitError,
+} from "./global-queue";
+import { getVertexLocation, getVertexProjectId } from "./providers/google";
 
-type ProviderModule = {
+export type ProviderModule = {
   getDefaultModel: () => string;
   generateImage: (prompt: string, model: string, args: CliArgs) => Promise<Uint8Array>;
   validateArgs?: (model: string, args: CliArgs) => void;
   getDefaultOutputExtension?: (model: string, args: CliArgs) => string;
 };
 
-type PreparedTask = {
+export type PreparedTask = {
   id: string;
   prompt: string;
   args: CliArgs;
@@ -53,12 +64,13 @@ type LoadedBatchTasks = {
 const MAX_ATTEMPTS = 3;
 const DEFAULT_MAX_WORKERS = 10;
 const POLL_WAIT_MS = 250;
-const DEFAULT_PROVIDER_RATE_LIMITS: Record<Provider, ProviderRateLimit> = {
+export const DEFAULT_PROVIDER_RATE_LIMITS: Record<Provider, ProviderRateLimit> = {
   replicate: { concurrency: 5, startIntervalMs: 700 },
   google: { concurrency: 3, startIntervalMs: 1100 },
   openai: { concurrency: 3, startIntervalMs: 1100 },
   openrouter: { concurrency: 3, startIntervalMs: 1100 },
   dashscope: { concurrency: 3, startIntervalMs: 1100 },
+  siliconflow: { concurrency: 3, startIntervalMs: 1100 },
   zai: { concurrency: 3, startIntervalMs: 1100 },
   minimax: { concurrency: 3, startIntervalMs: 1100 },
   jimeng: { concurrency: 3, startIntervalMs: 1100 },
@@ -66,6 +78,7 @@ const DEFAULT_PROVIDER_RATE_LIMITS: Record<Provider, ProviderRateLimit> = {
   azure: { concurrency: 3, startIntervalMs: 1100 },
   "codex-cli": { concurrency: 1, startIntervalMs: 2000 },
   agnes: { concurrency: 3, startIntervalMs: 1100 },
+  vertex: { concurrency: 1, startIntervalMs: 1500 },
 };
 
 function printUsage(): void {
@@ -80,7 +93,7 @@ Options:
   --image <path>            Output image path (required in single-image mode)
   --batchfile <path>        JSON batch file for multi-image generation
   --jobs <count>            Worker count for batch mode (default: auto, max from config, built-in default 10)
-  --provider google|openai|openrouter|dashscope|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agnes  Force provider (auto-detect by default)
+  --provider google|openai|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agnes|vertex  Force provider (auto-detect by default)
   -m, --model <id>          Model ID
   --ar <ratio>              Aspect ratio (e.g., 16:9, 1:1, 4:3)
   --size <WxH>              Size (e.g., 1024x1024)
@@ -88,7 +101,7 @@ Options:
   --imageSize 1K|2K|4K      Image size for Google/OpenRouter (default: from quality)
   --imageApiDialect <id>    OpenAI-compatible image dialect: openai-native|ratio-metadata
   --response-format file|url  Output mode: file (download image, default) or url (return URL text)
-  --ref <files...>          Reference images (Google, OpenAI, Azure, OpenRouter, Replicate supported families, MiniMax, Seedream 4.0/4.5/5.0, or DashScope wan2.7-image*)
+  --ref <files...>          Reference images (Google, Vertex, OpenAI, Azure, OpenRouter, Replicate supported families, MiniMax, Seedream 4.0/4.5/5.0, DashScope wan2.7-image*/qwen-image-2.0*/qwen-image-edit* with --provider dashscope, or SiliconFlow Qwen/Qwen-Image-Edit* with --provider siliconflow)
   --n <count>               Number of images for the current task (default: 1; Replicate currently requires 1)
   --json                    JSON output
   -h, --help                Show help
@@ -120,6 +133,7 @@ Environment variables:
   GOOGLE_API_KEY            Google API key
   GEMINI_API_KEY            Gemini API key (alias for GOOGLE_API_KEY)
   DASHSCOPE_API_KEY         DashScope API key
+  SILICONFLOW_API_KEY       SiliconFlow (硅基流动) API key
   ZAI_API_KEY               Z.AI API key
   BIGMODEL_API_KEY          Backward-compatible alias for Z.AI API key
   MINIMAX_API_KEY           MiniMax API key
@@ -130,7 +144,9 @@ Environment variables:
   OPENAI_IMAGE_MODEL        Default OpenAI model (gpt-image-2)
   OPENROUTER_IMAGE_MODEL    Default OpenRouter model (google/gemini-3.1-flash-image)
   GOOGLE_IMAGE_MODEL        Default Google model (gemini-3-pro-image)
+  VERTEX_IMAGE_MODEL        Default Vertex AI model (gemini-3-pro-image-preview)
   DASHSCOPE_IMAGE_MODEL     Default DashScope model (qwen-image-2.0-pro)
+  SILICONFLOW_IMAGE_MODEL   Default SiliconFlow model (Qwen/Qwen-Image)
   ZAI_IMAGE_MODEL           Default Z.AI model (glm-image)
   BIGMODEL_IMAGE_MODEL      Backward-compatible alias for Z.AI model (glm-image)
   MINIMAX_IMAGE_MODEL       Default MiniMax model (image-01)
@@ -145,6 +161,7 @@ Environment variables:
   OPENROUTER_TITLE          Optional app name for OpenRouter attribution
   GOOGLE_BASE_URL           Custom Google endpoint
   DASHSCOPE_BASE_URL        Custom DashScope endpoint
+  SILICONFLOW_BASE_URL      Custom SiliconFlow endpoint
   ZAI_BASE_URL              Custom Z.AI endpoint
   BIGMODEL_BASE_URL         Backward-compatible alias for Z.AI endpoint
   MINIMAX_BASE_URL          Custom MiniMax endpoint
@@ -157,6 +174,8 @@ Environment variables:
   AZURE_OPENAI_IMAGE_MODEL  Backward-compatible Azure deployment/model alias (defaults to gpt-image-2)
   SEEDREAM_BASE_URL         Custom Seedream endpoint
   BAOYU_IMAGE_GEN_MAX_WORKERS  Override batch worker cap
+  BAOYU_IMAGE_GEN_DISABLE_GLOBAL_QUEUE  Disable the cross-process global queue (1/true/yes)
+  BAOYU_IMAGE_GEN_QUEUE_DIR  Cross-process queue state dir (default ~/.baoyu-skills/image-gen-queue)
   BAOYU_IMAGE_GEN_<PROVIDER>_CONCURRENCY  Override provider concurrency (use underscores: BAOYU_IMAGE_GEN_CODEX_CLI_CONCURRENCY)
   BAOYU_IMAGE_GEN_<PROVIDER>_START_INTERVAL_MS  Override provider start gap in ms
   BAOYU_CODEX_IMAGEGEN_BIN  Path to codex-imagegen wrapper (default: bundled scripts/codex-imagegen/main.ts; accepts .ts or legacy .sh/binary)
@@ -257,20 +276,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
     if (a === "--provider") {
       const v = argv[++i];
-      if (
-        v !== "google" &&
-        v !== "openai" &&
-        v !== "openrouter" &&
-        v !== "dashscope" &&
-        v !== "zai" &&
-        v !== "minimax" &&
-        v !== "replicate" &&
-        v !== "jimeng" &&
-        v !== "seedream" &&
-        v !== "azure" &&
-        v !== "codex-cli" &&
-        v !== "agnes"
-      ) {
+      if (!v || !PROVIDERS.includes(v as Provider)) {
         throw new Error(`Invalid provider: ${v}`);
       }
       out.provider = v;
@@ -442,6 +448,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
           openai: null,
           openrouter: null,
           dashscope: null,
+          siliconflow: null,
           zai: null,
           minimax: null,
           replicate: null,
@@ -450,6 +457,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
           azure: null,
           "codex-cli": null,
           agnes: null,
+          vertex: null,
         };
         currentKey = "default_model";
         currentProvider = null;
@@ -468,20 +476,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
       } else if (
         currentKey === "provider_limits" &&
         indent >= 4 &&
-        (
-          key === "google" ||
-          key === "openai" ||
-          key === "openrouter" ||
-          key === "dashscope" ||
-          key === "zai" ||
-          key === "minimax" ||
-          key === "replicate" ||
-          key === "jimeng" ||
-          key === "seedream" ||
-          key === "azure" ||
-          key === "codex-cli" ||
-          key === "agnes"
-        )
+        PROVIDERS.includes(key as Provider)
       ) {
         config.batch ??= {};
         config.batch.provider_limits ??= {};
@@ -489,20 +484,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
         currentProvider = key;
       } else if (
         currentKey === "default_model" &&
-        (
-          key === "google" ||
-          key === "openai" ||
-          key === "openrouter" ||
-          key === "dashscope" ||
-          key === "zai" ||
-          key === "minimax" ||
-          key === "replicate" ||
-          key === "jimeng" ||
-          key === "seedream" ||
-          key === "azure" ||
-          key === "codex-cli" ||
-          key === "agnes"
-        )
+        PROVIDERS.includes(key as Provider)
       ) {
         const cleaned = value.replace(/['"]/g, "");
         config.default_model![key] = cleaned === "null" ? null : cleaned;
@@ -657,22 +639,11 @@ export function getConfiguredMaxWorkers(extendConfig: Partial<ExtendConfig>): nu
 export function getConfiguredProviderRateLimits(
   extendConfig: Partial<ExtendConfig>
 ): Record<Provider, ProviderRateLimit> {
-  const configured: Record<Provider, ProviderRateLimit> = {
-    replicate: { ...DEFAULT_PROVIDER_RATE_LIMITS.replicate },
-    google: { ...DEFAULT_PROVIDER_RATE_LIMITS.google },
-    openai: { ...DEFAULT_PROVIDER_RATE_LIMITS.openai },
-    openrouter: { ...DEFAULT_PROVIDER_RATE_LIMITS.openrouter },
-    dashscope: { ...DEFAULT_PROVIDER_RATE_LIMITS.dashscope },
-    zai: { ...DEFAULT_PROVIDER_RATE_LIMITS.zai },
-    minimax: { ...DEFAULT_PROVIDER_RATE_LIMITS.minimax },
-    jimeng: { ...DEFAULT_PROVIDER_RATE_LIMITS.jimeng },
-    seedream: { ...DEFAULT_PROVIDER_RATE_LIMITS.seedream },
-    azure: { ...DEFAULT_PROVIDER_RATE_LIMITS.azure },
-    "codex-cli": { ...DEFAULT_PROVIDER_RATE_LIMITS["codex-cli"] },
-    agnes: { ...DEFAULT_PROVIDER_RATE_LIMITS.agnes },
-  };
+  const configured = Object.fromEntries(
+    PROVIDERS.map((provider) => [provider, { ...DEFAULT_PROVIDER_RATE_LIMITS[provider] }]),
+  ) as Record<Provider, ProviderRateLimit>;
 
-  for (const provider of ["replicate", "google", "openai", "openrouter", "dashscope", "zai", "minimax", "jimeng", "seedream", "azure", "codex-cli", "agnes"] as Provider[]) {
+  for (const provider of PROVIDERS) {
     const envPrefix = `BAOYU_IMAGE_GEN_${provider.toUpperCase().replace(/-/g, "_")}`;
     const extendLimit = extendConfig.batch?.provider_limits?.[provider];
     configured[provider] = {
@@ -722,6 +693,7 @@ export function normalizeOutputImagePath(p: string, defaultExtension = ".png"): 
 function inferProviderFromModel(model: string | null): Provider | null {
   if (!model) return null;
   const normalized = model.trim();
+  if (normalized.startsWith("Qwen/")) return "siliconflow";
   if (normalized.includes("seedream") || normalized.includes("seededit")) return "seedream";
   if (normalized === "image-01" || normalized === "image-01-live") return "minimax";
   if (normalized === "glm-image" || normalized === "cogview-4-250304") return "zai";
@@ -741,11 +713,13 @@ export function detectProvider(args: CliArgs): Provider {
     args.provider !== "seedream" &&
     args.provider !== "minimax" &&
     args.provider !== "dashscope" &&
+    args.provider !== "siliconflow" &&
     args.provider !== "codex-cli" &&
-    args.provider !== "agnes"
+    args.provider !== "agnes" &&
+    args.provider !== "vertex"
   ) {
     throw new Error(
-      "Reference images require a ref-capable provider. Use --provider google (Gemini multimodal), --provider openai (GPT Image edits), --provider azure (Azure OpenAI), --provider openrouter (OpenRouter multimodal), --provider replicate, --provider dashscope with a wan2.7 image model, --provider seedream for supported Seedream models, --provider minimax for MiniMax subject-reference workflows, --provider codex-cli (Codex image_gen with references), or --provider agnes (Agnes Image)."
+      "Reference images require a ref-capable provider. Use --provider google (Gemini multimodal), --provider vertex (Vertex Gemini multimodal), --provider openai (GPT Image edits), --provider azure (Azure OpenAI), --provider openrouter (OpenRouter multimodal), --provider replicate, --provider dashscope with a supported qwen/wan model, --provider siliconflow with a Qwen image edit model, --provider seedream for supported Seedream models, --provider minimax for MiniMax subject-reference workflows, --provider codex-cli (Codex image_gen with references), or --provider agnes (Agnes Image)."
     );
   }
 
@@ -756,6 +730,7 @@ export function detectProvider(args: CliArgs): Provider {
   const hasOpenai = !!process.env.OPENAI_API_KEY;
   const hasOpenrouter = !!process.env.OPENROUTER_API_KEY;
   const hasDashscope = !!process.env.DASHSCOPE_API_KEY;
+  const hasSiliconflow = !!process.env.SILICONFLOW_API_KEY;
   const hasZai = !!(process.env.ZAI_API_KEY || process.env.BIGMODEL_API_KEY);
   const hasMinimax = !!process.env.MINIMAX_API_KEY;
   const hasReplicate = !!process.env.REPLICATE_API_TOKEN;
@@ -791,6 +766,10 @@ export function detectProvider(args: CliArgs): Provider {
     }
     return "agnes";
   }
+  if (modelProvider === "siliconflow") {
+    if (!hasSiliconflow) throw new Error("Model looks like a SiliconFlow Qwen image model, but SILICONFLOW_API_KEY is not set.");
+    return "siliconflow";
+  }
 
   if (args.referenceImages.length > 0) {
     if (hasGoogle) return "google";
@@ -812,6 +791,7 @@ export function detectProvider(args: CliArgs): Provider {
     hasAzure && "azure",
     hasOpenrouter && "openrouter",
     hasDashscope && "dashscope",
+    hasSiliconflow && "siliconflow",
     hasZai && "zai",
     hasMinimax && "minimax",
     hasReplicate && "replicate",
@@ -824,7 +804,7 @@ export function detectProvider(args: CliArgs): Provider {
   if (available.length > 1) return available[0]!;
 
   throw new Error(
-    "No API key found. Set GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY+AZURE_OPENAI_BASE_URL, OPENROUTER_API_KEY, DASHSCOPE_API_KEY, ZAI_API_KEY, MINIMAX_API_KEY, REPLICATE_API_TOKEN, JIMENG keys, ARK_API_KEY, or AGNES_API_KEY.\n" +
+    "No API key found. Set GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY+AZURE_OPENAI_BASE_URL, OPENROUTER_API_KEY, DASHSCOPE_API_KEY, SILICONFLOW_API_KEY, ZAI_API_KEY, MINIMAX_API_KEY, REPLICATE_API_TOKEN, JIMENG keys, ARK_API_KEY, or AGNES_API_KEY.\n" +
       "Create ~/.baoyu-skills/.env or <cwd>/.baoyu-skills/.env with your keys."
   );
 }
@@ -837,6 +817,10 @@ function isRemoteReferenceImage(refPath: string): boolean {
   return /^https?:\/\//i.test(refPath);
 }
 
+function isUnsupportedReferenceImageUri(refPath: string): boolean {
+  return /^(?:data:|oss:\/\/)/i.test(refPath);
+}
+
 function shouldAllowRemoteReferenceImages(provider: Provider | null): boolean {
   return provider === "dashscope" || provider === "agnes";
 }
@@ -847,6 +831,11 @@ export async function validateReferenceImages(
 ): Promise<void> {
   for (const refPath of referenceImages) {
     if (options.allowRemoteUrls && isRemoteReferenceImage(refPath)) continue;
+    if (isUnsupportedReferenceImageUri(refPath)) {
+      throw new Error(
+        `Reference image URI scheme is not supported by this CLI: ${refPath.startsWith("data:") ? "data:" : "oss://"}. Pass a local file path instead.`
+      );
+    }
     const fullPath = path.resolve(refPath);
     try {
       await access(fullPath);
@@ -878,13 +867,17 @@ export function isRetryableGenerationError(error: unknown): boolean {
     "support aspect ratios in",
     "requires total pixels between",
     "accept at most",
+    "Failed to obtain Vertex AI access token",
+    "Could not determine Vertex AI project ID",
+    "Could not locate the gcloud CLI",
   ];
   return !nonRetryableMarkers.some((marker) => msg.includes(marker));
 }
 
 async function loadProviderModule(provider: Provider): Promise<ProviderModule> {
-  if (provider === "google") return (await import("./providers/google")) as ProviderModule;
+  if (provider === "google" || provider === "vertex") return (await import("./providers/google")) as ProviderModule;
   if (provider === "dashscope") return (await import("./providers/dashscope")) as ProviderModule;
+  if (provider === "siliconflow") return (await import("./providers/siliconflow")) as ProviderModule;
   if (provider === "zai") return (await import("./providers/zai")) as ProviderModule;
   if (provider === "minimax") return (await import("./providers/minimax")) as ProviderModule;
   if (provider === "replicate") return (await import("./providers/replicate")) as ProviderModule;
@@ -905,7 +898,7 @@ async function loadPromptForArgs(args: CliArgs): Promise<string | null> {
   return prompt;
 }
 
-function getModelForProvider(
+export function getModelForProvider(
   provider: Provider,
   requestedModel: string | null,
   extendConfig: Partial<ExtendConfig>,
@@ -914,11 +907,13 @@ function getModelForProvider(
   if (requestedModel) return requestedModel;
   if (extendConfig.default_model) {
     if (provider === "google" && extendConfig.default_model.google) return extendConfig.default_model.google;
+    if (provider === "vertex" && extendConfig.default_model.vertex) return extendConfig.default_model.vertex;
     if (provider === "openai" && extendConfig.default_model.openai) return extendConfig.default_model.openai;
     if (provider === "openrouter" && extendConfig.default_model.openrouter) {
       return extendConfig.default_model.openrouter;
     }
     if (provider === "dashscope" && extendConfig.default_model.dashscope) return extendConfig.default_model.dashscope;
+    if (provider === "siliconflow" && extendConfig.default_model.siliconflow) return extendConfig.default_model.siliconflow;
     if (provider === "zai" && extendConfig.default_model.zai) return extendConfig.default_model.zai;
     if (provider === "minimax" && extendConfig.default_model.minimax) return extendConfig.default_model.minimax;
     if (provider === "replicate" && extendConfig.default_model.replicate) return extendConfig.default_model.replicate;
@@ -928,6 +923,10 @@ function getModelForProvider(
     if (provider === "codex-cli" && extendConfig.default_model["codex-cli"]) return extendConfig.default_model["codex-cli"];
     if (provider === "agnes" && extendConfig.default_model.agnes) return extendConfig.default_model.agnes;
   }
+  if (provider === "vertex" && process.env.VERTEX_IMAGE_MODEL) {
+    return process.env.VERTEX_IMAGE_MODEL;
+  }
+  if (provider === "vertex") return "gemini-3-pro-image-preview";
   return providerModule.getDefaultModel();
 }
 
@@ -991,7 +990,9 @@ export function resolveBatchPath(batchDir: string, filePath: string): string {
 }
 
 function resolveBatchReferencePath(batchDir: string, filePath: string): string {
-  return isRemoteReferenceImage(filePath) ? filePath : resolveBatchPath(batchDir, filePath);
+  return isRemoteReferenceImage(filePath) || isUnsupportedReferenceImageUri(filePath)
+    ? filePath
+    : resolveBatchPath(batchDir, filePath);
 }
 
 export function createTaskArgs(baseArgs: CliArgs, task: BatchTaskInput, batchDir: string): CliArgs {
@@ -1067,32 +1068,130 @@ async function writeImage(outputPath: string, imageData: Uint8Array): Promise<vo
   await writeFile(outputPath, imageData);
 }
 
-async function generatePreparedTask(task: PreparedTask): Promise<TaskResult> {
+function globalQueueDisabled(): boolean {
+  const v = (process.env.BAOYU_IMAGE_GEN_DISABLE_GLOBAL_QUEUE || "").toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+function resolveQueueResourceKey(provider: Provider, model: string): string {
+  if (provider === "vertex") {
+    return buildVertexResourceKey({
+      projectId: getVertexProjectId(),
+      location: getVertexLocation(),
+      model,
+    });
+  }
+  return buildProviderResourceKey(provider, model);
+}
+
+function taskHashFor(task: PreparedTask): string {
+  return computeTaskHash({
+    provider: task.provider,
+    model: task.model,
+    prompt: task.prompt,
+    aspectRatio: task.args.aspectRatio,
+    size: task.args.size,
+    imageSize: task.args.imageSize,
+    quality: task.args.quality,
+    imageApiDialect: task.args.imageApiDialect,
+    n: task.args.n,
+    responseFormat: task.args.responseFormat,
+    referenceImages: task.args.referenceImages,
+  });
+}
+
+async function generatePreparedTask(
+  task: PreparedTask,
+  providerRateLimits?: Record<Provider, ProviderRateLimit>
+): Promise<TaskResult> {
   console.error(`Using ${task.provider} / ${task.model} for ${task.id}`);
   console.error(
     `Switch model: --model <id> | EXTEND.md default_model.${task.provider} | env ${task.provider.toUpperCase()}_IMAGE_MODEL`
   );
 
+  const limits =
+    providerRateLimits?.[task.provider] ?? getConfiguredProviderRateLimits({})[task.provider];
+  const resourceKey = resolveQueueResourceKey(task.provider, task.model);
+  const hash = taskHashFor(task);
+  const useGlobalQueue = !globalQueueDisabled();
+
   let attempts = 0;
   while (attempts < MAX_ATTEMPTS) {
     attempts += 1;
     try {
-      const imageData = await task.providerModule.generateImage(task.prompt, task.model, task.args);
-      await writeImage(task.outputPath, imageData);
-      return {
-        id: task.id,
-        provider: task.provider,
-        model: task.model,
+      if (!useGlobalQueue) {
+        const imageData = await task.providerModule.generateImage(task.prompt, task.model, task.args);
+        await writeImage(task.outputPath, imageData);
+        return {
+          id: task.id,
+          provider: task.provider,
+          model: task.model,
+          outputPath: task.outputPath,
+          success: true,
+          attempts,
+          error: null,
+        };
+      }
+
+      const slot = await acquireGlobalSlot({
+        resourceKey,
         outputPath: task.outputPath,
-        success: true,
-        attempts,
-        error: null,
-      };
+        taskHash: hash,
+        limits,
+      });
+
+      if (slot.mode === "joined") {
+        if (path.resolve(slot.outputPath) !== path.resolve(task.outputPath)) {
+          await ensureDir(path.dirname(task.outputPath));
+          await copyFile(slot.outputPath, task.outputPath);
+        }
+        console.error(`[${task.id}] Reused in-flight/global result → ${task.outputPath}`);
+        return {
+          id: task.id,
+          provider: task.provider,
+          model: task.model,
+          outputPath: task.outputPath,
+          success: true,
+          attempts,
+          error: null,
+        };
+      }
+
+      try {
+        const imageData = await task.providerModule.generateImage(task.prompt, task.model, task.args);
+        await writeImage(task.outputPath, imageData);
+        await slot.release({ kind: "success" });
+        return {
+          id: task.id,
+          provider: task.provider,
+          model: task.model,
+          outputPath: task.outputPath,
+          success: true,
+          attempts,
+          error: null,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = extractHttpStatus(error);
+        const hit429 = isRateLimitError(error) || status === 429;
+        await slot.release({
+          kind: "error",
+          status,
+          message,
+          is429: hit429,
+        });
+        throw error;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const canRetry = attempts < MAX_ATTEMPTS && isRetryableGenerationError(error);
       if (canRetry) {
-        console.error(`[${task.id}] Attempt ${attempts}/${MAX_ATTEMPTS} failed, retrying...`);
+        const delay = computeRetryDelayMs(attempts);
+        const hit429 = isRateLimitError(error);
+        console.error(
+          `[${task.id}] Attempt ${attempts}/${MAX_ATTEMPTS} failed${hit429 ? " (429/rate-limit)" : ""}, retrying in ${delay}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
       return {
@@ -1148,13 +1247,13 @@ export function getWorkerCount(taskCount: number, jobs: number | null, maxWorker
   return Math.max(1, Math.min(requested, taskCount, maxWorkers));
 }
 
-async function runBatchTasks(
+export async function runBatchTasks(
   tasks: PreparedTask[],
   jobs: number | null,
   extendConfig: Partial<ExtendConfig>
 ): Promise<TaskResult[]> {
   if (tasks.length === 1) {
-    return [await generatePreparedTask(tasks[0]!)];
+    return [await generatePreparedTask(tasks[0]!, getConfiguredProviderRateLimits(extendConfig))];
   }
 
   const maxWorkers = getConfiguredMaxWorkers(extendConfig);
@@ -1162,7 +1261,10 @@ async function runBatchTasks(
   const acquireProvider = createProviderGate(providerRateLimits);
   const workerCount = getWorkerCount(tasks.length, jobs, maxWorkers);
   console.error(`Batch mode: ${tasks.length} tasks, ${workerCount} workers, parallel mode enabled.`);
-  for (const provider of ["replicate", "google", "openai", "openrouter", "dashscope", "zai", "minimax", "jimeng", "seedream", "azure", "codex-cli", "agnes"] as Provider[]) {
+  console.error(
+    `Global queue: ${globalQueueDisabled() ? "DISABLED" : `enabled (${process.env.BAOYU_IMAGE_GEN_QUEUE_DIR || "~/.baoyu-skills/image-gen-queue"})`}`
+  );
+  for (const provider of PROVIDERS) {
     const limit = providerRateLimits[provider];
     console.error(`- ${provider}: concurrency=${limit.concurrency}, startIntervalMs=${limit.startIntervalMs}`);
   }
@@ -1179,7 +1281,7 @@ async function runBatchTasks(
       const task = tasks[currentIndex]!;
       const release = await acquireProvider(task.provider);
       try {
-        results[currentIndex] = await generatePreparedTask(task);
+        results[currentIndex] = await generatePreparedTask(task, providerRateLimits);
       } finally {
         release();
       }
@@ -1214,7 +1316,7 @@ function emitJson(payload: unknown): void {
 
 async function runSingleMode(args: CliArgs, extendConfig: Partial<ExtendConfig>): Promise<void> {
   const task = await prepareSingleTask(args, extendConfig);
-  const result = await generatePreparedTask(task);
+  const result = await generatePreparedTask(task, getConfiguredProviderRateLimits(extendConfig));
   if (!result.success) {
     throw new Error(result.error || "Generation failed");
   }

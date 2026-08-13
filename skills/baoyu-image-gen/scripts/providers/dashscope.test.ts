@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import {
@@ -62,6 +65,14 @@ function useEnv(
       }
     }
   });
+}
+
+async function makeTempImage(t: TestContext, name: string, bytes?: Uint8Array): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dashscope-test-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const filePath = path.join(dir, name);
+  await fs.writeFile(filePath, bytes || Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7m0AAAAASUVORK5CYII=", "base64"));
+  return filePath;
 }
 
 test("DashScope default model prefers env override and otherwise uses qwen-image-2.0-pro", (t) => {
@@ -129,6 +140,11 @@ test("resolveSizeForModel validates explicit qwen-image-2.0 sizes by total pixel
       }),
     /total pixels between/,
   );
+});
+
+test("DashScope qwen-image-edit base model omits size while plus/max models retain it", () => {
+  assert.equal(resolveSizeForModel("qwen-image-edit", { size: null, aspectRatio: "1:1", quality: "2k" }), null);
+  assert.equal(resolveSizeForModel("qwen-image-edit-plus", { size: null, aspectRatio: "1:1", quality: "2k" }), "1536*1536");
 });
 
 test("resolveSizeForModel enforces fixed sizes for qwen-image-max/plus/image", () => {
@@ -338,6 +354,29 @@ test("Wan 2.7 request body forwards remote reference image URLs", async (t) => {
     { image: "https://example.com/ref.png" },
     { text: "combine these" },
   ]);
+});
+
+test("DashScope qwen ref request bodies support qwen2/edit and enforce model limits", async (t) => {
+  useEnv(t, { DASHSCOPE_API_KEY: "fake-key" });
+  const ref = await makeTempImage(t, "looks-like-png.png", Uint8Array.from([0xff, 0xd8, 0xff, 0x00]));
+  const originalFetch = globalThis.fetch;
+  let capturedBody: any = null;
+  globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    capturedBody = JSON.parse(String(init?.body));
+    return Response.json({ output: { choices: [{ message: { content: [{ image: "data:image/png;base64,iVBORw0KGgo=" }] } }] } });
+  }) as typeof fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  await generateImage("blue", "qwen-image-2.0-pro", makeCliArgs({ referenceImages: [ref] }));
+  assert.match(String(capturedBody.input.messages[0].content[0].image), /^data:image\/jpeg;base64,/);
+  assert.equal(capturedBody.parameters.size, "1536*1536");
+
+  await generateImage("blue", "qwen-image-edit", makeCliArgs({ referenceImages: [ref] }));
+  assert.ok(!("size" in capturedBody.parameters));
+
+  await assert.rejects(() => generateImage("blue", "qwen-image-max", makeCliArgs({ referenceImages: [ref] })), /qwen-image-2.0-pro or qwen-image-edit/);
+  await assert.rejects(() => generateImage("blue", "qwen-image-edit", makeCliArgs()), /require at least one/);
+  await assert.rejects(() => generateImage("blue", "qwen-image-2.0-pro", makeCliArgs({ referenceImages: [ref, ref, ref, ref] })), /at most 3/);
 });
 
 test("Wan 2.7 rejects --n > 1 to prevent silent multi-image billing", async (t) => {

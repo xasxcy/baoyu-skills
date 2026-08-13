@@ -4,13 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
+import { PROVIDERS } from "./types.ts";
 import type { CliArgs, ExtendConfig } from "./types.ts";
 import {
+  DEFAULT_PROVIDER_RATE_LIMITS,
   createTaskArgs,
   detectProvider,
   ensureDir,
+  extractYamlFrontMatter,
   getConfiguredMaxWorkers,
   getConfiguredProviderRateLimits,
+  getModelForProvider,
   getWorkerCount,
   isRetryableGenerationError,
   loadBatchTasks,
@@ -20,7 +24,10 @@ import {
   parseArgs,
   parseOpenAIImageApiDialect,
   parseSimpleYaml,
+  runBatchTasks,
   validateReferenceImages,
+  type PreparedTask,
+  type ProviderModule,
 } from "./main.ts";
 
 function makeArgs(overrides: Partial<CliArgs> = {}): CliArgs {
@@ -125,6 +132,10 @@ test("parseArgs falls back to positional prompt and rejects invalid provider", (
   );
 });
 
+test("parseArgs accepts the SiliconFlow provider", () => {
+  assert.equal(parseArgs(["--provider", "siliconflow"]).provider, "siliconflow");
+});
+
 test("validateReferenceImages can skip remote URLs for providers that support them", async () => {
   await validateReferenceImages(["https://example.com/ref.png"], { allowRemoteUrls: true });
 
@@ -132,6 +143,26 @@ test("validateReferenceImages can skip remote URLs for providers that support th
     () => validateReferenceImages(["https://example.com/ref.png"]),
     /Reference image not found/,
   );
+});
+
+test("validateReferenceImages rejects unsupported data and oss reference URI schemes clearly", async () => {
+  await assert.rejects(
+    () => validateReferenceImages(["data:image/png;base64,AAAA"]),
+    /URI scheme is not supported.*data:/,
+  );
+  await assert.rejects(
+    () => validateReferenceImages(["oss:\/\/bucket/ref.png"]),
+    /URI scheme is not supported.*oss:\/\//,
+  );
+});
+
+test("batch reference paths preserve rejected URI schemes so validation gives the same clear error", async () => {
+  const batchDir = path.join(os.tmpdir(), "baoyu-ref-uri-batch");
+  for (const ref of ["data:image/png;base64,AAAA", "oss://bucket/ref.png"]) {
+    const taskArgs = createTaskArgs(makeArgs(), { prompt: "x", image: "out.png", ref: [ref] }, batchDir);
+    assert.deepEqual(taskArgs.referenceImages, [ref]);
+    await assert.rejects(() => validateReferenceImages(taskArgs.referenceImages), /URI scheme is not supported/);
+  }
 });
 
 test("parseSimpleYaml parses nested defaults and provider limits", () => {
@@ -144,6 +175,7 @@ default_image_size: 2K
 default_image_api_dialect: ratio-metadata
 default_model:
   google: gemini-3-pro-image
+  siliconflow: Qwen/Qwen-Image-Edit
   openai: gpt-image-2
   zai: glm-image
   azure: image-prod
@@ -176,6 +208,7 @@ batch:
   assert.equal(config.default_image_size, "2K");
   assert.equal(config.default_image_api_dialect, "ratio-metadata");
   assert.equal(config.default_model?.google, "gemini-3-pro-image");
+  assert.equal(config.default_model?.siliconflow, "Qwen/Qwen-Image-Edit");
   assert.equal(config.default_model?.openai, "gpt-image-2");
   assert.equal(config.default_model?.zai, "glm-image");
   assert.equal(config.default_model?.azure, "image-prod");
@@ -200,6 +233,20 @@ batch:
     concurrency: 1,
     start_interval_ms: 1500,
   });
+});
+
+test("provider canonical list stays aligned with runtime rate limits and EXTEND defaults", () => {
+  assert.deepEqual(Object.keys(DEFAULT_PROVIDER_RATE_LIMITS).sort(), [...PROVIDERS].sort());
+  const config = parseSimpleYaml("default_model:\n  siliconflow: Qwen/Qwen-Image\n");
+  assert.deepEqual(Object.keys(config.default_model || {}).sort(), [...PROVIDERS].sort());
+});
+
+test("SKILL.md frontmatter remains parseable and records the fork release version", async () => {
+  const skill = await fs.readFile(path.resolve(process.cwd(), "skills/baoyu-image-gen/SKILL.md"), "utf8");
+  const frontmatter = extractYamlFrontMatter(skill);
+  assert.ok(frontmatter);
+  assert.match(frontmatter, /^name: baoyu-image-gen$/m);
+  assert.match(frontmatter, /^version: 2\.2\.0$/m);
 });
 
 test("ensureDir creates nested dirs, is idempotent on an existing dir, and rethrows for a non-directory", async (t: TestContext) => {
@@ -484,6 +531,32 @@ test("detectProvider allows DashScope reference-image workflows when explicitly 
   );
 });
 
+test("detectProvider infers SiliconFlow only from its Qwen slash model IDs", (t) => {
+  useEnv(t, {
+    SILICONFLOW_API_KEY: "siliconflow-key",
+    GOOGLE_API_KEY: null,
+    OPENAI_API_KEY: null,
+    DASHSCOPE_API_KEY: null,
+  });
+  assert.equal(detectProvider(makeArgs({ model: "Qwen/Qwen-Image" })), "siliconflow");
+  assert.equal(
+    detectProvider(makeArgs({ provider: "siliconflow", model: "Qwen/Qwen-Image-Edit", referenceImages: ["ref.png"] })),
+    "siliconflow",
+  );
+});
+
+test("detectProvider auto-selects SiliconFlow when it is the only configured provider", (t) => {
+  useEnv(t, {
+    SILICONFLOW_API_KEY: "siliconflow-key",
+    GOOGLE_API_KEY: null, GEMINI_API_KEY: null, OPENAI_API_KEY: null,
+    AZURE_OPENAI_API_KEY: null, AZURE_OPENAI_BASE_URL: null, OPENROUTER_API_KEY: null,
+    DASHSCOPE_API_KEY: null, ZAI_API_KEY: null, BIGMODEL_API_KEY: null, MINIMAX_API_KEY: null,
+    REPLICATE_API_TOKEN: null, JIMENG_ACCESS_KEY_ID: null, JIMENG_SECRET_ACCESS_KEY: null,
+    ARK_API_KEY: null, AGNES_API_KEY: null,
+  });
+  assert.equal(detectProvider(makeArgs()), "siliconflow");
+});
+
 test("detectProvider selects MiniMax when only MiniMax credentials are configured or the model id matches", (t) => {
   useEnv(t, {
     GOOGLE_API_KEY: null,
@@ -641,4 +714,132 @@ test("path normalization, worker count, and retry classification follow expected
     false,
   );
   assert.equal(isRetryableGenerationError(new Error("socket hang up")), true);
+  assert.equal(
+    isRetryableGenerationError(new Error("Failed to obtain Vertex AI access token via gcloud or environment variables.")),
+    false,
+  );
+  assert.equal(
+    isRetryableGenerationError(new Error("Could not determine Vertex AI project ID. Set VERTEX_PROJECT_ID.")),
+    false,
+  );
+});
+
+test("Vertex uses its documented default model when no override is configured", (t) => {
+  useEnv(t, { VERTEX_IMAGE_MODEL: null });
+  const providerModule: ProviderModule = {
+    getDefaultModel: () => "gemini-3-pro-image",
+    generateImage: async () => new Uint8Array(),
+  };
+  assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-preview");
+  process.env.VERTEX_IMAGE_MODEL = "gemini-3-pro-image-custom";
+  assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-custom");
+});
+
+function makePreparedTask(
+  overrides: Partial<PreparedTask> & { providerModule: ProviderModule },
+): PreparedTask {
+  return {
+    id: "task",
+    prompt: "a prompt",
+    args: makeArgs({ prompt: "a prompt" }),
+    provider: "google",
+    model: "test-model",
+    outputPath: "unset.png",
+    ...overrides,
+  };
+}
+
+test("runBatchTasks single-task fast path joins an in-flight equivalent job and copies its output", async (t) => {
+  const queueDir = await makeTempDir("baoyu-q-single-dedup-");
+  useEnv(t, {
+    BAOYU_IMAGE_GEN_QUEUE_DIR: queueDir,
+    BAOYU_IMAGE_GEN_DISABLE_GLOBAL_QUEUE: null,
+  });
+
+  const outDir = await makeTempDir("baoyu-single-out-");
+  const firstOutputPath = path.join(outDir, "first.png");
+  const secondOutputPath = path.join(outDir, "second.png");
+
+  let callCount = 0;
+  let providerStarted!: () => void;
+  const didStart = new Promise<void>((resolve) => {
+    providerStarted = resolve;
+  });
+  let releaseProvider!: () => void;
+  const waitForRelease = new Promise<void>((resolve) => {
+    releaseProvider = resolve;
+  });
+  const providerModule: ProviderModule = {
+    getDefaultModel: () => "test-model",
+    generateImage: async () => {
+      callCount += 1;
+      providerStarted();
+      await waitForRelease;
+      return Uint8Array.from([1, 2, 3]);
+    },
+  };
+
+  const taskA = makePreparedTask({ id: "a", outputPath: firstOutputPath, providerModule });
+  const taskB = makePreparedTask({ id: "b", outputPath: secondOutputPath, providerModule });
+
+  const resultAPromise = runBatchTasks([taskA], null, {});
+  await didStart;
+  const resultBPromise = runBatchTasks([taskB], null, {});
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  releaseProvider();
+  const [resultsA, resultsB] = await Promise.all([resultAPromise, resultBPromise]);
+
+  assert.equal(resultsA[0]!.success, true);
+  assert.equal(resultsB[0]!.success, true);
+  assert.equal(
+    callCount,
+    1,
+    "the second single-task call should join the in-flight first call instead of invoking the provider again",
+  );
+  assert.deepEqual(await fs.readFile(firstOutputPath), await fs.readFile(secondOutputPath));
+});
+
+test("runBatchTasks single-task fast path honors EXTEND.md provider_limits.start_interval_ms via the global queue", async (t) => {
+  const queueDir = await makeTempDir("baoyu-q-single-interval-");
+  useEnv(t, {
+    BAOYU_IMAGE_GEN_QUEUE_DIR: queueDir,
+    BAOYU_IMAGE_GEN_DISABLE_GLOBAL_QUEUE: null,
+  });
+
+  const outDir = await makeTempDir("baoyu-single-interval-out-");
+
+  const callTimestamps: number[] = [];
+  const providerModule: ProviderModule = {
+    getDefaultModel: () => "test-model",
+    generateImage: async () => {
+      callTimestamps.push(Date.now());
+      return Uint8Array.from([9]);
+    },
+  };
+
+  const extendConfig: Partial<ExtendConfig> = {
+    batch: {
+      provider_limits: {
+        google: { concurrency: 1, start_interval_ms: 300 },
+      },
+    },
+  };
+
+  await runBatchTasks(
+    [makePreparedTask({ id: "first", outputPath: path.join(outDir, "one.png"), providerModule })],
+    null,
+    extendConfig,
+  );
+  await runBatchTasks(
+    [makePreparedTask({ id: "second", outputPath: path.join(outDir, "two.png"), providerModule })],
+    null,
+    extendConfig,
+  );
+
+  assert.equal(callTimestamps.length, 2);
+  const gapMs = callTimestamps[1]! - callTimestamps[0]!;
+  assert.ok(
+    gapMs >= 250,
+    `expected the EXTEND-configured start_interval_ms=300 to be enforced by the global queue on the single-task path, got a ${gapMs}ms gap`,
+  );
 });

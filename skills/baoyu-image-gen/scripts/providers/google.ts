@@ -327,11 +327,232 @@ async function generateWithImagen(
   throw new Error("No image in response");
 }
 
+type VertexNoImageResponse = {
+  responseId?: unknown;
+  modelVersion?: unknown;
+  createTime?: unknown;
+  promptFeedback?: {
+    blockReason?: unknown;
+    blockReasonMessage?: unknown;
+    safetyRatings?: unknown;
+  };
+  candidates?: unknown;
+};
+
+function summarizeVertexSafetyRatings(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((rating) => {
+    if (!rating || typeof rating !== "object") return [];
+    const source = rating as Record<string, unknown>;
+    const summary: Record<string, unknown> = {};
+    for (const key of ["category", "probability", "probabilityScore", "severity", "severityScore"] as const) {
+      if (typeof source[key] === "string" || typeof source[key] === "number") summary[key] = source[key];
+    }
+    if (typeof source.blocked === "boolean") summary.blocked = source.blocked;
+    return [summary];
+  });
+}
+
+/**
+ * Keeps the API fields needed to classify a no-image Vertex AI result, while
+ * omitting prompts, inline image bytes, and model text content.
+ */
+function summarizeVertexNoImageResponse(response: VertexNoImageResponse): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+  for (const key of ["responseId", "modelVersion", "createTime"] as const) {
+    if (typeof response[key] === "string") summary[key] = response[key];
+  }
+
+  if (response.promptFeedback) {
+    const { blockReason, blockReasonMessage, safetyRatings } = response.promptFeedback;
+    summary.promptFeedback = {
+      ...(typeof blockReason === "string" ? { blockReason } : {}),
+      ...(typeof blockReasonMessage === "string" ? { hasBlockReasonMessage: true } : {}),
+      ...(Array.isArray(safetyRatings) ? { safetyRatings: summarizeVertexSafetyRatings(safetyRatings) } : {}),
+    };
+  }
+
+  const candidates = Array.isArray(response.candidates) ? response.candidates : [];
+  summary.candidates = candidates.flatMap((candidate, index) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const source = candidate as Record<string, unknown>;
+    const content = source.content && typeof source.content === "object"
+      ? source.content as Record<string, unknown>
+      : {};
+    const parts = Array.isArray(content.parts) ? content.parts : [];
+
+    return [{
+      index,
+      ...(typeof source.finishReason === "string" ? { finishReason: source.finishReason } : {}),
+      ...(typeof source.finishMessage === "string" ? { hasFinishMessage: true } : {}),
+      ...(Array.isArray(source.safetyRatings)
+        ? { safetyRatings: summarizeVertexSafetyRatings(source.safetyRatings) }
+        : {}),
+      parts: parts.flatMap((part) => {
+        if (!part || typeof part !== "object") return [];
+        const sourcePart = part as Record<string, unknown>;
+        if (sourcePart.inlineData && typeof sourcePart.inlineData === "object") {
+          const inlineData = sourcePart.inlineData as Record<string, unknown>;
+          return [{
+            kind: "inlineData",
+            ...(typeof inlineData.mimeType === "string" ? { mimeType: inlineData.mimeType } : {}),
+            hasData: typeof inlineData.data === "string" && inlineData.data.length > 0,
+          }];
+        }
+        if (typeof sourcePart.text === "string") return [{ kind: "text", textLength: sourcePart.text.length }];
+        if (sourcePart.fileData && typeof sourcePart.fileData === "object") {
+          const fileData = sourcePart.fileData as Record<string, unknown>;
+          return [{
+            kind: "fileData",
+            ...(typeof fileData.mimeType === "string" ? { mimeType: fileData.mimeType } : {}),
+          }];
+        }
+        return [{ kind: "other", keys: Object.keys(sourcePart).sort() }];
+      }),
+    }];
+  });
+
+  return summary;
+}
+
+function resolveGcloudBin(): string {
+  if (process.env.GCLOUD_BIN) return process.env.GCLOUD_BIN;
+  try {
+    const found = execFileSync("which", ["gcloud"], {
+      encoding: "utf8",
+      timeout: 5000,
+    }).trim();
+    if (found) return found;
+  } catch {}
+  const candidates = [
+    process.env.HOME ? path.join(process.env.HOME, "google-cloud-sdk", "bin", "gcloud") : null,
+    "/opt/homebrew/bin/gcloud",
+    "/usr/local/bin/gcloud",
+  ].filter((p): p is string => Boolean(p));
+  for (const candidate of candidates) {
+    try {
+      execFileSync(candidate, ["--version"], { encoding: "utf8", timeout: 5000 });
+      return candidate;
+    } catch {}
+  }
+  throw new Error(
+    "Could not locate the gcloud CLI. Install the Google Cloud SDK, or set GCLOUD_BIN to the gcloud binary path.",
+  );
+}
+
+function getVertexAccessToken(): string {
+  if (process.env.VERTEX_BEARER_TOKEN) return process.env.VERTEX_BEARER_TOKEN;
+  if (process.env.GOOGLE_ACCESS_TOKEN) return process.env.GOOGLE_ACCESS_TOKEN;
+  try {
+    const token = execFileSync(resolveGcloudBin(), ["auth", "print-access-token"], {
+      encoding: "utf8",
+      timeout: 10000,
+    }).trim();
+    if (token) return token;
+  } catch {}
+  throw new Error("Failed to obtain Vertex AI access token via gcloud or environment variables.");
+}
+
+export function getVertexProjectId(): string {
+  if (process.env.VERTEX_PROJECT_ID) return process.env.VERTEX_PROJECT_ID;
+  if (process.env.GOOGLE_CLOUD_PROJECT) return process.env.GOOGLE_CLOUD_PROJECT;
+  try {
+    const proj = execFileSync(resolveGcloudBin(), ["config", "get-value", "project"], {
+      encoding: "utf8",
+      timeout: 5000,
+    }).trim();
+    if (proj && proj !== "(unset)") return proj;
+  } catch {}
+  throw new Error(
+    "Could not determine Vertex AI project ID. Set VERTEX_PROJECT_ID, GOOGLE_CLOUD_PROJECT, or configure gcloud's default project.",
+  );
+}
+
+export function getVertexLocation(): string {
+  return process.env.VERTEX_LOCATION || "global";
+}
+
+async function generateWithVertex(
+  prompt: string,
+  model: string,
+  args: CliArgs,
+): Promise<Uint8Array> {
+  const token = getVertexAccessToken();
+  const projectId = getVertexProjectId();
+  const location = getVertexLocation();
+  const normalizedModel = normalizeGoogleModelId(model);
+
+  const url = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${normalizedModel}:streamGenerateContent`;
+
+  const promptWithAspect = addAspectRatioToPrompt(prompt, args.aspectRatio);
+  const parts: Array<{
+    text?: string;
+    inlineData?: { data: string; mimeType: string };
+  }> = [];
+
+  for (const refPath of args.referenceImages) {
+    const { data, mimeType } = await readImageAsBase64(refPath);
+    parts.push({ inlineData: { data, mimeType } });
+  }
+  parts.push({ text: promptWithAspect });
+
+  const imageConfig: { imageSize: "1K" | "2K" | "4K" } = {
+    imageSize: getGoogleImageSize(args),
+  };
+
+  console.log(`Generating image with Vertex AI (${normalizedModel})...`, imageConfig);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts,
+        },
+      ],
+      generationConfig: {
+        responseModalities: ["IMAGE"],
+        imageConfig,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Vertex AI error (${res.status}): ${errText}`);
+  }
+
+  const json = (await res.json()) as any;
+  // Stream response is an array or single object
+  const items = Array.isArray(json) ? json : [json];
+  for (const item of items) {
+    const imageData = extractInlineImageData(item);
+    if (imageData) return Uint8Array.from(Buffer.from(imageData, "base64"));
+  }
+
+  const diagnostics = items.map((item, chunkIndex) => ({
+    chunkIndex,
+    ...summarizeVertexNoImageResponse(item),
+  }));
+  throw new Error(
+    `No image in Vertex AI response. Diagnostics: ${JSON.stringify({ streamChunks: diagnostics })}`,
+  );
+}
+
 export async function generateImage(
   prompt: string,
   model: string,
   args: CliArgs,
 ): Promise<Uint8Array> {
+  if (args.provider === "vertex") {
+    return generateWithVertex(prompt, model, args);
+  }
+
   if (isGoogleImagen(model)) {
     if (args.referenceImages.length > 0) {
       throw new Error(
