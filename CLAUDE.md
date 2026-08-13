@@ -14,6 +14,10 @@ Skills are exposed through the single `baoyu-skills` plugin in `.claude-plugin/m
 
 Each skill contains `SKILL.md` (YAML front matter + docs), optional `scripts/`, `references/`, `prompts/`.
 
+## Fork synchronization
+
+This is xasxcy's `baoyu-skills` fork. Before any upstream update, run `git fetch upstream --prune`, inspect the merge-base and the incoming diff, then selectively integrate the required provider changes. Preserve this fork's `baoyu-image-gen` compatibility path and its Vertex/global-queue, DashScope Qwen-ref, and SiliconFlow changes; do not directly merge or overwrite them with upstream's `baoyu-imagine` migration.
+
 Top-level `scripts/` contains repo maintenance utilities (sync, hooks, publish).
 
 ## Running Skills
