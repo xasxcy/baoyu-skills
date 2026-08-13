@@ -53,6 +53,8 @@ options:
     description: "Router for Gemini/FLUX/OpenAI-compatible image models"
   - label: "DashScope"
     description: "Alibaba Cloud - Qwen-Image, strong Chinese/English text rendering"
+  - label: "SiliconFlow"
+    description: "硅基流动 Qwen Image - Qwen/Qwen-Image text-to-image and Qwen image editing"
   - label: "Z.AI"
     description: "GLM-image, strong poster and text-heavy image generation"
   - label: "MiniMax"

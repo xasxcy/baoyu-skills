@@ -11,7 +11,7 @@ description: EXTEND.md YAML schema for baoyu-image-gen user preferences
 ---
 version: 1
 
-default_provider: null      # google|openai|azure|openrouter|dashscope|zai|minimax|replicate|jimeng|seedream|codex-cli|agnes|null (null = auto-detect; codex-cli is never auto-detected — pin it here or via --provider)
+default_provider: null      # google|vertex|openai|azure|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|codex-cli|agnes|null (null = auto-detect; codex-cli is never auto-detected — pin it here or via --provider)
 
 default_quality: null       # normal|2k|null (null = use default: 2k)
 
@@ -27,6 +27,7 @@ default_model:
   azure: null               # Azure deployment name, e.g., "gpt-image-2" or "image-prod"
   openrouter: null          # e.g., "google/gemini-3.1-flash-image"
   dashscope: null           # e.g., "qwen-image-2.0-pro"
+  siliconflow: null         # e.g., "Qwen/Qwen-Image"
   zai: null                 # e.g., "glm-image"
   minimax: null             # e.g., "image-01"
   replicate: null           # e.g., "google/nano-banana-2"
@@ -52,6 +53,9 @@ batch:
       concurrency: 3
       start_interval_ms: 1100
     dashscope:
+      concurrency: 3
+      start_interval_ms: 1100
+    siliconflow:
       concurrency: 3
       start_interval_ms: 1100
     zai:
@@ -84,6 +88,7 @@ batch:
 | `default_model.azure` | string\|null | null | Azure default deployment name |
 | `default_model.openrouter` | string\|null | null | OpenRouter default model |
 | `default_model.dashscope` | string\|null | null | DashScope default model |
+| `default_model.siliconflow` | string\|null | null | SiliconFlow default model (`Qwen/Qwen-Image`, `Qwen/Qwen-Image-Edit`, or `Qwen/Qwen-Image-Edit-2509`) |
 | `default_model.zai` | string\|null | null | Z.AI default model |
 | `default_model.minimax` | string\|null | null | MiniMax default model |
 | `default_model.replicate` | string\|null | null | Replicate default model |
@@ -120,6 +125,7 @@ default_model:
   azure: "gpt-image-2"
   openrouter: "google/gemini-3.1-flash-image"
   dashscope: "qwen-image-2.0-pro"
+  siliconflow: "Qwen/Qwen-Image"
   zai: "glm-image"
   minimax: "image-01"
   replicate: "google/nano-banana-2"
@@ -134,6 +140,9 @@ batch:
       concurrency: 3
       start_interval_ms: 1100
     zai:
+      concurrency: 3
+      start_interval_ms: 1100
+    siliconflow:
       concurrency: 3
       start_interval_ms: 1100
     openrouter:
