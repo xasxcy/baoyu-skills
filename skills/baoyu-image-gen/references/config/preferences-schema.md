@@ -23,6 +23,7 @@ default_image_api_dialect: null  # openai-native|ratio-metadata|null (OpenAI-com
 
 default_model:
   google: null              # e.g., "gemini-3-pro-image", "gemini-3.1-flash-image"
+  vertex: null              # e.g., "gemini-3-pro-image-preview" (Vertex AI; default when unset)
   openai: null              # e.g., "gpt-image-2", "gpt-image-1.5", "gpt-image-1"
   azure: null               # Azure deployment name, e.g., "gpt-image-2" or "image-prod"
   openrouter: null          # e.g., "google/gemini-3.1-flash-image"
@@ -43,6 +44,9 @@ batch:
     google:
       concurrency: 3
       start_interval_ms: 1100
+    vertex:
+      concurrency: 1
+      start_interval_ms: 1500
     openai:
       concurrency: 3
       start_interval_ms: 1100
@@ -84,6 +88,7 @@ batch:
 | `default_image_size` | string\|null | null | Google/OpenRouter image size (overrides quality) |
 | `default_image_api_dialect` | string\|null | null | OpenAI-compatible image dialect (`openai-native` or `ratio-metadata`) |
 | `default_model.google` | string\|null | null | Google default model |
+| `default_model.vertex` | string\|null | null | Vertex AI default model (built-in default `gemini-3-pro-image-preview`) |
 | `default_model.openai` | string\|null | null | OpenAI default model |
 | `default_model.azure` | string\|null | null | Azure default deployment name |
 | `default_model.openrouter` | string\|null | null | OpenRouter default model |
@@ -121,6 +126,7 @@ default_image_size: 2K
 default_image_api_dialect: null
 default_model:
   google: "gemini-3-pro-image"
+  vertex: "gemini-3-pro-image-preview"
   openai: "gpt-image-2"
   azure: "gpt-image-2"
   openrouter: "google/gemini-3.1-flash-image"

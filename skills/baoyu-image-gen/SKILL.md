@@ -1,7 +1,7 @@
 ---
 name: baoyu-image-gen
 description: AI image generation with OpenAI GPT Image 2, Azure OpenAI, Google/Vertex, OpenRouter, DashScope, SiliconFlow Qwen, Z.AI GLM-Image, MiniMax, Jimeng, Seedream, Replicate and Agnes APIs. Supports text-to-image, reference images, aspect ratios, and batch generation from saved prompt files. Sequential by default; use batch parallel generation when the user already has multiple prompts or wants stable multi-image throughput. Use when user asks to generate, create, or draw images.
-version: 2.2.0
+version: 2.2.1
 metadata:
   openclaw:
     homepage: https://github.com/JimLiu/baoyu-skills#baoyu-image-gen
@@ -139,6 +139,10 @@ When the user wants a person/object preserved from reference images:
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI API key |
 | `OPENROUTER_API_KEY` | OpenRouter API key |
 | `GOOGLE_API_KEY` | Google API key |
+| `VERTEX_PROJECT_ID` | Vertex AI project (falls back to `GOOGLE_CLOUD_PROJECT`, then `gcloud config get-value project`) |
+| `VERTEX_LOCATION` | Vertex AI location (default `global`) |
+| `VERTEX_BEARER_TOKEN` (alias `GOOGLE_ACCESS_TOKEN`) | Vertex AI access token; omit to use `gcloud auth print-access-token` |
+| `GCLOUD_BIN` | Path to the `gcloud` binary when it is not on `PATH` |
 | `DASHSCOPE_API_KEY` | DashScope API key |
 | `SILICONFLOW_API_KEY` | SiliconFlow (硅基流动) API key |
 | `ZAI_API_KEY` (alias `BIGMODEL_API_KEY`) | Z.AI API key |
