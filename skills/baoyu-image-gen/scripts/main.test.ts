@@ -27,6 +27,7 @@ import {
   parseSimpleYaml,
   runBatchTasks,
   validateReferenceImages,
+  writeImage,
   type PreparedTask,
   type ProviderModule,
 } from "./main.ts";
@@ -851,4 +852,32 @@ test("runBatchTasks single-task fast path honors EXTEND.md provider_limits.start
     gapMs >= 250,
     `expected the EXTEND-configured start_interval_ms=300 to be enforced by the global queue on the single-task path, got a ${gapMs}ms gap`,
   );
+});
+
+test("writeImage replaces the destination atomically and leaves no temp residue", async () => {
+  const dir = await makeTempDir("baoyu-image-gen-write-");
+  const outputPath = path.join(dir, "nested", "out.png");
+
+  await writeImage(outputPath, new Uint8Array([1, 2, 3, 4]));
+  assert.deepEqual([...(await fs.readFile(outputPath))], [1, 2, 3, 4]);
+
+  await writeImage(outputPath, new Uint8Array([9, 9]));
+  assert.deepEqual([...(await fs.readFile(outputPath))], [9, 9]);
+
+  const siblings = await fs.readdir(path.dirname(outputPath));
+  assert.deepEqual(siblings, ["out.png"], "the temp file must not survive a successful write");
+});
+
+test("writeImage cleans up its temp file and preserves the destination when the rename fails", async () => {
+  const dir = await makeTempDir("baoyu-image-gen-write-fail-");
+  // A non-empty directory at the destination makes rename() fail, standing in
+  // for any late failure after the temp file is already on disk.
+  const outputPath = path.join(dir, "out.png");
+  await fs.mkdir(outputPath, { recursive: true });
+  await fs.writeFile(path.join(outputPath, "keep.txt"), "keep");
+
+  await assert.rejects(() => writeImage(outputPath, new Uint8Array([1, 2, 3])));
+
+  assert.deepEqual(await fs.readdir(outputPath), ["keep.txt"]);
+  assert.deepEqual(await fs.readdir(dir), ["out.png"], "no leftover .tmp- file after a failed write");
 });

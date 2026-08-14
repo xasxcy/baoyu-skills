@@ -2,7 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { access, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { PROVIDERS } from "./types";
 import type {
   BatchFile,
@@ -130,6 +130,10 @@ Environment variables:
   OPENROUTER_API_KEY        OpenRouter API key
   GOOGLE_API_KEY            Google API key
   GEMINI_API_KEY            Gemini API key (alias for GOOGLE_API_KEY)
+  VERTEX_PROJECT_ID         Vertex AI project (falls back to GOOGLE_CLOUD_PROJECT, then gcloud config)
+  VERTEX_LOCATION           Vertex AI location (default: global)
+  VERTEX_BEARER_TOKEN       Vertex AI access token (alias GOOGLE_ACCESS_TOKEN; default: gcloud auth print-access-token)
+  GCLOUD_BIN                Path to the gcloud binary when it is not on PATH
   DASHSCOPE_API_KEY         DashScope API key
   SILICONFLOW_API_KEY       SiliconFlow (硅基流动) API key
   ZAI_API_KEY               Z.AI API key
@@ -1061,9 +1065,40 @@ async function prepareBatchTasks(
   };
 }
 
-async function writeImage(outputPath: string, imageData: Uint8Array): Promise<void> {
+function tempOutputPath(outputPath: string): string {
+  return `${outputPath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Writes to a sibling temp file and renames into place. The global queue's
+ * join path decides a peer's result is ready by watching the destination's
+ * size/mtime, so a partially written destination would be copied as a
+ * truncated image. Same-directory rename is atomic on POSIX, which makes
+ * "the destination changed" imply "the destination is complete".
+ */
+export async function writeImage(outputPath: string, imageData: Uint8Array): Promise<void> {
   await ensureDir(path.dirname(outputPath));
-  await writeFile(outputPath, imageData);
+  const tempPath = tempOutputPath(outputPath);
+  try {
+    await writeFile(tempPath, imageData);
+    await rename(tempPath, outputPath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => {});
+    throw error;
+  }
+}
+
+/** Same atomicity requirement as writeImage, for the dedup copy path. */
+async function copyImageAtomic(sourcePath: string, outputPath: string): Promise<void> {
+  await ensureDir(path.dirname(outputPath));
+  const tempPath = tempOutputPath(outputPath);
+  try {
+    await copyFile(sourcePath, tempPath);
+    await rename(tempPath, outputPath);
+  } catch (error) {
+    await unlink(tempPath).catch(() => {});
+    throw error;
+  }
 }
 
 function globalQueueDisabled(): boolean {
@@ -1133,8 +1168,7 @@ async function generatePreparedTask(
 
       if (slot.mode === "joined") {
         if (path.resolve(slot.outputPath) !== path.resolve(task.outputPath)) {
-          await ensureDir(path.dirname(task.outputPath));
-          await copyFile(slot.outputPath, task.outputPath);
+          await copyImageAtomic(slot.outputPath, task.outputPath);
         }
         console.error(`[${task.id}] Reused in-flight/global result → ${task.outputPath}`);
         return {
