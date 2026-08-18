@@ -2,6 +2,14 @@
 
 English | [中文](./CHANGELOG.zh.md)
 
+## 2.6.0 - 2026-08-18
+
+### Features
+- `baoyu-image-gen`: add `agy-cli` provider — generates images via Antigravity CLI's (`agy`) built-in `generate_image` tool, using the user's Antigravity subscription (no separate image API key required). Lives at `packages/baoyu-agy-imagegen` alongside the existing `baoyu-codex-imagegen` sibling. Supports up to 3 `--ref` reference images, verified to hold character/subject consistency across generations (useful for recurring-character and digital-human workflows). Output is JPEG (not PNG). See [docs/agy-imagegen-backend.md](docs/agy-imagegen-backend.md)
+
+### Documentation
+- Image generation skills (`baoyu-cover-image`, `baoyu-xhs-images`, `baoyu-infographic`, `baoyu-comic`, `baoyu-slide-deck`, `baoyu-article-illustrator`): document `agy-imagegen` as a `preferred_image_backend` option alongside `codex-imagegen`
+
 ## 2.5.2 - 2026-06-18
 
 ### Fixes

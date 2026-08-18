@@ -88,6 +88,27 @@ Without bun installed: `npx -y bun packages/baoyu-codex-imagegen/src/main.ts …
 
 Stdout emits a single JSON line: `{"status":"ok","path":...,"bytes":N,...}`. On failure, `{"status":"error","error_kind":...}`. Skills route here by setting `preferred_image_backend: codex-imagegen` in EXTEND.md, or by running `baoyu-image-gen --provider codex-cli` (which spawns the same wrapper internally). Full reference: [docs/codex-imagegen-backend.md](docs/codex-imagegen-backend.md).
 
+### `agy-imagegen` Backend
+
+A backend for non-agy runtimes (e.g., Claude Code) that generates images by spawning `agy -p ... --output-format json --dangerously-skip-permissions --sandbox` and delegating to Antigravity CLI's built-in `generate_image` tool. Uses the user's Antigravity subscription — no separate image API key required. Lives under [packages/baoyu-agy-imagegen](packages/baoyu-agy-imagegen) so it follows the same workspace layout as other shared packages.
+
+Output is **JPEG**, not PNG — `generate_image` always writes `.jpg` regardless of the requested name; keep a `.jpg`/`.jpeg` output extension. Supports up to 3 `--ref` reference images (forwarded into `generate_image`'s `ImagePaths`), verified to hold face/hair/outfit consistency across generations — useful for recurring-character/digital-human workflows.
+
+Invoke via (TS entrypoint with `#!/usr/bin/env bun` shebang):
+
+```bash
+bun packages/baoyu-agy-imagegen/src/main.ts \
+  --image <output.jpg> \
+  --prompt-file prompts/01-cover.md \
+  --aspect 16:9 \
+  --ref character-sheet.jpg \
+  --cache-dir ~/.cache/baoyu-agy-imagegen
+```
+
+Without bun installed: `npx -y bun packages/baoyu-agy-imagegen/src/main.ts …`.
+
+Stdout emits a single JSON line: `{"status":"ok","path":...,"bytes":N,...}`. On failure, `{"status":"error","error_kind":...}`. Skills route here by setting `preferred_image_backend: agy-imagegen` in EXTEND.md, or by running `baoyu-image-gen --provider agy-cli` (which spawns the same wrapper internally). Full reference: [docs/agy-imagegen-backend.md](docs/agy-imagegen-backend.md).
+
 ## Release Process
 
 Use `/release-skills` workflow. Never skip:

@@ -28,7 +28,7 @@ Each image-consuming skill's `EXTEND.md` carries a single `preferred_image_backe
 |---|---|
 | `auto` (default) | Apply the auto-select rule — runtime-native preferred, fall back to only installed backend, ask if multiple non-native. |
 | `ask` | Always confirm the backend on every run, even when a runtime-native tool exists. |
-| `<backend-id>` (e.g., `codex-imagegen`, `baoyu-image-gen`, `GenerateImage`, `image_generate`) | Pin this backend when available; fall back to `auto` if it isn't. |
+| `<backend-id>` (e.g., `codex-imagegen`, `agy-imagegen`, `baoyu-image-gen`, `GenerateImage`, `image_generate`) | Pin this backend when available; fall back to `auto` if it isn't. |
 
 The field is **absent-equals-auto**: older `EXTEND.md` files without this field behave exactly as if `preferred_image_backend: auto` were set. No schema version bump is needed to introduce it.
 

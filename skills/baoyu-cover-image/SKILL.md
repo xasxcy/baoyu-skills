@@ -30,6 +30,7 @@ When this skill needs to render an image, resolve the backend in this order:
 3. **Auto-select** (when the preference is `auto`, unset, or the pinned backend isn't available):
    - **Codex (`imagegen`)** — first, inspect your available-skills / tool inventory. If a skill named `imagegen` is listed, you are running inside Codex and MUST use it: invoke via the `Skill` tool with `skill: "imagegen"`, passing the saved prompt file's content (plus output path and aspect ratio per Codex `imagegen`'s own args). Codex `imagegen` is the official raster backend in that runtime and outranks any non-native skill (e.g., `baoyu-image-gen`) unless the user has explicitly pinned a different `preferred_image_backend`.
    - **Codex via `codex exec` (`codex-imagegen`)** — if the current runtime exposes no native `imagegen` skill but the `codex` CLI is on `PATH` with an active `codex login`, route through `baoyu-image-gen --provider codex-cli` (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in [references/codex-imagegen.md](references/codex-imagegen.md) — load that file only when this branch is selected.
+   - **Antigravity via `agy` (`agy-imagegen`)** — if the current runtime exposes no native `imagegen`/`GenerateImage` skill but the `agy` CLI is on `PATH` and authenticated, route through `baoyu-image-gen --provider agy-cli` (preferred), or — if baoyu-image-gen is unavailable — invoke the bundled wrapper directly. Details, parameters, and the runtime-discovery procedure live in [references/agy-imagegen.md](references/agy-imagegen.md) — load that file only when this branch is selected.
    - **Cursor (`GenerateImage`)** — if the runtime exposes a native `GenerateImage` tool, you are running inside Cursor and it outranks any non-native skill the same way Codex `imagegen` does. Two hard caveats: (a) it has no aspect-ratio parameter — state the target aspect ratio / dimensions explicitly in the prompt text passed as `description`; (b) it does not accept an output directory — it saves to a tool-managed location, so after generation copy/move the file to the skill's expected output path (e.g., `outputs/.../NN-xxx.png`). Reference images go in `reference_image_paths`.
    - **Other runtime-native tools** — if the runtime exposes a different native image tool (e.g., Hermes `image_generate`), use it the same way.
    - Otherwise, if exactly one non-native backend is installed (e.g., `baoyu-image-gen`), use it.
@@ -218,6 +219,7 @@ Save to `prompts/cover.md`. Template: [references/workflow/prompt-template.md](r
    - `style`/`palette` → extract traits, append to prompt
 5. **Generate**: Call the chosen backend with the prompt file, output path, aspect ratio.
    - **`codex-imagegen`**: see [references/codex-imagegen.md](references/codex-imagegen.md) for the invocation contract (preferred `baoyu-image-gen --provider codex-cli` path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics).
+   - **`agy-imagegen`**: see [references/agy-imagegen.md](references/agy-imagegen.md) for the invocation contract (preferred `baoyu-image-gen --provider agy-cli` path, runtime wrapper discovery, parameter notes, stdout schema, batch semantics).
    - **Codex `imagegen` (native)** or other runtime-native tools / `baoyu-image-gen` skill: per the rule in `## Image Generation Tools` above.
 6. On failure: auto-retry once
 
@@ -269,6 +271,7 @@ EXTEND.md lives at the path noted in **Step 0**. Three ways to change it:
 - **Common one-line edits**:
   - `preferred_image_backend: auto` — default; runtime-native tool wins, falls back to the only installed backend, asks only if multiple non-native are present.
   - `preferred_image_backend: codex-imagegen` — pin to Codex's built-in.
+  - `preferred_image_backend: agy-imagegen` — pin to Antigravity's built-in (also the most reliable choice for a recurring character/digital-human look via `--ref`).
   - `preferred_image_backend: baoyu-image-gen` — pin to the baoyu-image-gen skill.
   - `preferred_image_backend: ask` — confirm backend every run.
   - `watermark.enabled: true`, `preferred_type`, `preferred_palette`, `preferred_rendering`, `default_aspect`, `quick_mode: true`, `language` — shift the auto-selection defaults and confirmation flow.

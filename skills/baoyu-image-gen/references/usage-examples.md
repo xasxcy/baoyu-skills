@@ -84,6 +84,12 @@ ${BUN_X} {baseDir}/scripts/main.ts --prompt "A cinematic portrait" --image out.p
 # Codex CLI with reference images (style/composition guidance)
 ${BUN_X} {baseDir}/scripts/main.ts --prompt "Match this color palette" --image out.png --provider codex-cli --ref source.png --ar 1:1
 
+# Antigravity CLI (uses Antigravity subscription; requires `agy` on PATH and login; output is JPEG)
+${BUN_X} {baseDir}/scripts/main.ts --prompt "A cinematic portrait" --image out.jpg --provider agy-cli --ar 16:9
+
+# Antigravity CLI with a reference image (verified to hold character/subject consistency across generations)
+${BUN_X} {baseDir}/scripts/main.ts --prompt "Same character, now waving at the camera from a desk" --image out.jpg --provider agy-cli --ref character-sheet.jpg --ar 1:1
+
 # Agnes (default model)
 ${BUN_X} {baseDir}/scripts/main.ts --prompt "A detailed infographic" --image out.png --provider agnes
 
@@ -98,6 +104,13 @@ Notes on `codex-cli`:
 - Never auto-selected — pin via `--provider codex-cli` or `default_provider: codex-cli` in EXTEND.md.
 - Only `n=1` supported (Codex `image_gen` returns one image per call); `--size`, `--imageSize`, `--quality`, and `--imageApiDialect` are ignored or rejected.
 - Typically 5–10× slower than direct OpenAI / Google API calls (except on cache hits). Tune via `BAOYU_CODEX_IMAGEGEN_TIMEOUT_MS`, `BAOYU_CODEX_IMAGEGEN_RETRIES`, and `BAOYU_CODEX_IMAGEGEN_CACHE_DIR`.
+
+Notes on `agy-cli`:
+- Never auto-selected — pin via `--provider agy-cli` or `default_provider: agy-cli` in EXTEND.md.
+- Only `n=1` supported (`generate_image` returns one image per call); `--size`, `--imageSize`, `--quality`, and `--imageApiDialect` are ignored or rejected. `--ar` must be one of `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `9:16`, `16:9`.
+- **Output is JPEG, not PNG** — `generate_image` always writes JPEG; keep a `.jpg`/`.jpeg` output path.
+- `--ref` accepts up to 3 images and reliably holds face/hair/outfit consistency across generations — the most reliable option in this skill for a recurring character or digital-human look.
+- Tune via `BAOYU_AGY_IMAGEGEN_TIMEOUT_MS`, `BAOYU_AGY_IMAGEGEN_RETRIES`, and `BAOYU_AGY_IMAGEGEN_CACHE_DIR`.
 
 ## Batch Mode
 

@@ -93,6 +93,9 @@ ${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider o
 # Codex CLI (uses logged-in Codex subscription — no OPENAI_API_KEY required; requires `codex` on PATH)
 ${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider codex-cli --ar 16:9
 
+# Antigravity CLI (uses logged-in Antigravity subscription; requires `agy` on PATH; output is JPEG)
+${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.jpg --provider agy-cli --ar 16:9
+
 # Batch mode
 ${BUN_X} {baseDir}/scripts/main.ts --batchfile batch.json --jobs 4
 
@@ -120,14 +123,14 @@ When the user wants a person/object preserved from reference images:
 | `--image <path>` | Output image path (required in single-image mode) |
 | `--batchfile <path>` | JSON batch file for multi-image generation |
 | `--jobs <count>` | Worker count for batch mode (default: auto, max from config, built-in default 10) |
-| `--provider google\|vertex\|openai\|azure\|openrouter\|dashscope\|siliconflow\|zai\|minimax\|jimeng\|seedream\|replicate\|codex-cli\|agnes` | Force provider (default: auto-detect; `codex-cli` is never auto-selected — must be pinned via CLI or EXTEND.md) |
+| `--provider google\|vertex\|openai\|azure\|openrouter\|dashscope\|siliconflow\|zai\|minimax\|jimeng\|seedream\|replicate\|codex-cli\|agy-cli\|agnes` | Force provider (default: auto-detect; `codex-cli` and `agy-cli` are never auto-selected — must be pinned via CLI or EXTEND.md) |
 | `--model <id>`, `-m` | Model ID — see provider references for defaults and allowed values |
 | `--ar <ratio>` | Aspect ratio (`16:9`, `1:1`, `4:3`, …) |
 | `--size <WxH>` | Explicit size (e.g., `1024x1024`; for `gpt-image-2`, width/height must be multiples of 16, max edge 3840px, ratio no wider than 3:1) |
 | `--quality normal\|2k` | Quality preset (default: `2k`) |
 | `--imageSize 1K\|2K\|4K` | Image size for Google/OpenRouter (default: from quality) |
 | `--imageApiDialect openai-native\|ratio-metadata` | OpenAI-compatible endpoint dialect — use `ratio-metadata` for gateways that expect aspect-ratio `size` plus `metadata.resolution` |
-| `--ref <files...>` | Reference images. Supported by Google/Vertex multimodal, OpenAI GPT Image edits, Azure OpenAI edits (PNG/JPG only), OpenRouter multimodal models, Replicate supported families, MiniMax subject-reference, Seedream 5.0/4.5/4.0, DashScope `wan2.7-image*`, `qwen-image-2.0*`, and `qwen-image-edit*` (pin `--provider dashscope`), and SiliconFlow `Qwen/Qwen-Image-Edit*` (pin `--provider siliconflow`). SiliconFlow accepts local files only in this release; DashScope supports local files and HTTP(S). `data:` and `oss://` references are rejected by the CLI. |
+| `--ref <files...>` | Reference images. Supported by Google/Vertex multimodal, OpenAI GPT Image edits, Azure OpenAI edits (PNG/JPG only), OpenRouter multimodal models, Replicate supported families, MiniMax subject-reference, Seedream 5.0/4.5/4.0, DashScope `wan2.7-image*`, `qwen-image-2.0*`, and `qwen-image-edit*` (pin `--provider dashscope`), SiliconFlow `Qwen/Qwen-Image-Edit*` (pin `--provider siliconflow`), `codex-cli`, and `agy-cli` (up to 3 images; verified to hold character/subject consistency across generations — see `references/providers/agy-cli.md`). SiliconFlow accepts local files only in this release; DashScope supports local files and HTTP(S). `data:` and `oss://` references are rejected by the CLI. |
 | `--n <count>` | Number of images. Replicate requires `--n 1` (single-output save semantics) |
 | `--json` | JSON output |
 
@@ -158,13 +161,18 @@ When the user wants a person/object preserved from reference images:
 | `OPENAI_IMAGE_API_DIALECT` | `openai-native` \| `ratio-metadata` |
 | `OPENROUTER_HTTP_REFERER`, `OPENROUTER_TITLE` | Optional OpenRouter attribution |
 | `BAOYU_IMAGE_GEN_MAX_WORKERS` | Override batch worker cap |
-| `BAOYU_IMAGE_GEN_<PROVIDER>_CONCURRENCY` | Per-provider concurrency (e.g., `BAOYU_IMAGE_GEN_REPLICATE_CONCURRENCY`; for codex-cli use `BAOYU_IMAGE_GEN_CODEX_CLI_CONCURRENCY`) |
+| `BAOYU_IMAGE_GEN_<PROVIDER>_CONCURRENCY` | Per-provider concurrency (e.g., `BAOYU_IMAGE_GEN_REPLICATE_CONCURRENCY`; for codex-cli use `BAOYU_IMAGE_GEN_CODEX_CLI_CONCURRENCY`, for agy-cli use `BAOYU_IMAGE_GEN_AGY_CLI_CONCURRENCY`) |
 | `BAOYU_IMAGE_GEN_<PROVIDER>_START_INTERVAL_MS` | Per-provider start-gap |
 | `BAOYU_CODEX_IMAGEGEN_BIN` | Override the codex-imagegen wrapper path for the `codex-cli` provider (default: bundled `scripts/codex-imagegen/main.ts`; accepts `.ts` or legacy `.sh`/binary) |
 | `BAOYU_CODEX_IMAGEGEN_CACHE_DIR` | Enable idempotency cache for the `codex-cli` provider (off by default) |
 | `BAOYU_CODEX_IMAGEGEN_TIMEOUT_MS` | Per-attempt `codex exec` timeout for the `codex-cli` provider (default: 300000 ms) |
 | `BAOYU_CODEX_IMAGEGEN_RETRIES` | Wrapper-side retry attempts on retryable errors for the `codex-cli` provider (default: 2) |
 | `BAOYU_CODEX_IMAGEGEN_LOG_FILE` | Append JSONL diagnostic log for the `codex-cli` provider |
+| `BAOYU_AGY_IMAGEGEN_BIN` | Override the agy-imagegen wrapper path for the `agy-cli` provider (default: bundled `scripts/agy-imagegen/main.ts`; accepts `.ts` or legacy `.sh`/binary) |
+| `BAOYU_AGY_IMAGEGEN_CACHE_DIR` | Enable idempotency cache for the `agy-cli` provider (off by default) |
+| `BAOYU_AGY_IMAGEGEN_TIMEOUT_MS` | Per-attempt `agy` timeout for the `agy-cli` provider (default: 300000 ms) |
+| `BAOYU_AGY_IMAGEGEN_RETRIES` | Wrapper-side retry attempts on retryable errors for the `agy-cli` provider (default: 2) |
+| `BAOYU_AGY_IMAGEGEN_LOG_FILE` | Append JSONL diagnostic log for the `agy-cli` provider |
 
 **Load priority**: CLI args > EXTEND.md > env vars > `<cwd>/.baoyu-skills/.env` > `~/.baoyu-skills/.env`
 
@@ -221,15 +229,17 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 | OpenRouter (multimodal models, `/chat/completions` flow) | `references/providers/openrouter.md` |
 | Replicate (nano-banana, Seedream, Wan) | `references/providers/replicate.md` |
 | Codex CLI (wraps bundled `scripts/codex-imagegen/`; Codex login, no `OPENAI_API_KEY`) | `references/providers/codex-cli.md` |
+| Antigravity CLI (wraps bundled `scripts/agy-imagegen/`; agy login, JPEG output, up to 3 refs) | `references/providers/agy-cli.md` |
 | Agnes (agnes-image-2.1-flash, reference-image support) | `references/providers/agnes.md` |
 
 ## Provider Selection
 
 1. `--ref` provided + no `--provider` → auto-select Google → OpenAI → Azure → OpenRouter → Replicate → Seedream → MiniMax → Agnes (MiniMax's subject reference is more specialized toward character/portrait consistency)
-2. `--provider` specified → use it (if `--ref`, must be google/openai/azure/openrouter/replicate/seedream/minimax/codex-cli/agnes)
+2. `--provider` specified → use it (if `--ref`, must be google/openai/azure/openrouter/replicate/seedream/minimax/codex-cli/agy-cli/agnes)
 3. Only one API key present → use that provider
 4. Multiple keys → default priority: Google → OpenAI → Azure → OpenRouter → DashScope → Z.AI → MiniMax → Replicate → Jimeng → Seedream → Agnes
 5. `codex-cli` is **never auto-selected** — set `default_provider: codex-cli` in EXTEND.md or pass `--provider codex-cli`. It spawns `codex exec` via the bundled `scripts/codex-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Codex subscription (no `OPENAI_API_KEY`). Requires `codex` on `PATH` with an active `codex login`.
+6. `agy-cli` is **never auto-selected** — set `default_provider: agy-cli` in EXTEND.md or pass `--provider agy-cli`. It spawns `agy -p ...` via the bundled `scripts/agy-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Antigravity subscription. Requires `agy` on `PATH` with an active login. Output is JPEG.
 
 ## Quality Presets
 

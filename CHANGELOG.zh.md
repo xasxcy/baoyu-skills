@@ -2,6 +2,14 @@
 
 [English](./CHANGELOG.md) | 中文
 
+## 2.6.0 - 2026-08-18
+
+### 新功能
+- `baoyu-image-gen`：新增 `agy-cli` provider——通过 Antigravity CLI（`agy`）内置的 `generate_image` 工具生成图片，使用用户自己的 Antigravity 订阅（无需单独的图片 API key）。代码位于 `packages/baoyu-agy-imagegen`，与已有的 `baoyu-codex-imagegen` 是同级实现。支持最多 3 张 `--ref` 参考图，经验证能在多次生成之间保持人物/主体形象一致（适合数字人、连续出场角色等场景）。输出为 JPEG（非 PNG）。详见 [docs/agy-imagegen-backend.md](docs/agy-imagegen-backend.md)
+
+### 文档
+- 图片生成类 skills（`baoyu-cover-image`、`baoyu-xhs-images`、`baoyu-infographic`、`baoyu-comic`、`baoyu-slide-deck`、`baoyu-article-illustrator`）：在 `preferred_image_backend` 可选项中补充 `agy-imagegen`，与 `codex-imagegen` 并列
+
 ## 2.5.2 - 2026-06-18
 
 ### 修复
