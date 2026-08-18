@@ -1,0 +1,40 @@
+{
+  "name": "baoyu-agy-imagegen",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Generate images via Antigravity CLI's (agy) built-in generate_image tool from non-agy runtimes (Claude Code, Hermes, …).",
+  "bin": {
+    "agy-imagegen": "./src/main.ts"
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/main.ts",
+      "default": "./src/main.ts"
+    },
+    "./src/*": "./src/*"
+  },
+  "scripts": {
+    "test": "bun test",
+    "smoke": "bun src/main.ts --help"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xasxcy/baoyu-skills.git",
+    "directory": "packages/baoyu-agy-imagegen"
+  },
+  "bugs": {
+    "url": "https://github.com/xasxcy/baoyu-skills/issues"
+  },
+  "homepage": "https://github.com/xasxcy/baoyu-skills/tree/main/packages/baoyu-agy-imagegen#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}

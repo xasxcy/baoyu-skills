@@ -1,0 +1,47 @@
+name: agy-imagegen tests
+
+on:
+  push:
+    paths:
+      - 'packages/baoyu-agy-imagegen/**'
+      - 'skills/baoyu-image-gen/scripts/agy-imagegen/**'
+      - 'scripts/sync-agy-imagegen.sh'
+      - '.github/workflows/agy-imagegen-tests.yml'
+  pull_request:
+    paths:
+      - 'packages/baoyu-agy-imagegen/**'
+      - 'skills/baoyu-image-gen/scripts/agy-imagegen/**'
+      - 'scripts/sync-agy-imagegen.sh'
+      - '.github/workflows/agy-imagegen-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Show Bun version
+        run: bun --version
+
+      - name: Run unit tests
+        working-directory: packages/baoyu-agy-imagegen
+        run: bun test
+
+      - name: Bundle smoke test (catches import/syntax errors)
+        run: bun build --target=node packages/baoyu-agy-imagegen/src/main.ts --outfile /tmp/main-build.js
+
+      - name: Help output smoke test
+        run: bun packages/baoyu-agy-imagegen/src/main.ts --help
+
+      - name: Verify bundled skill copy is in sync
+        run: |
+          bash scripts/sync-agy-imagegen.sh
+          git diff --exit-code -- skills/baoyu-image-gen/scripts/agy-imagegen/

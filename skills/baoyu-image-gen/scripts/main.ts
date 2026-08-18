@@ -75,6 +75,7 @@ export const DEFAULT_PROVIDER_RATE_LIMITS: Record<Provider, ProviderRateLimit> =
   seedream: { concurrency: 3, startIntervalMs: 1100 },
   azure: { concurrency: 3, startIntervalMs: 1100 },
   "codex-cli": { concurrency: 1, startIntervalMs: 2000 },
+  "agy-cli": { concurrency: 1, startIntervalMs: 2000 },
   agnes: { concurrency: 3, startIntervalMs: 1100 },
   vertex: { concurrency: 1, startIntervalMs: 1500 },
 };
@@ -91,7 +92,7 @@ Options:
   --image <path>            Output image path (required in single-image mode)
   --batchfile <path>        JSON batch file for multi-image generation
   --jobs <count>            Worker count for batch mode (default: auto, max from config, built-in default 10)
-  --provider google|openai|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agnes|vertex  Force provider (auto-detect by default)
+  --provider google|openai|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agy-cli|agnes|vertex  Force provider (auto-detect by default)
   -m, --model <id>          Model ID
   --ar <ratio>              Aspect ratio (e.g., 16:9, 1:1, 4:3)
   --size <WxH>              Size (e.g., 1024x1024)
@@ -99,7 +100,7 @@ Options:
   --imageSize 1K|2K|4K      Image size for Google/OpenRouter (default: from quality)
   --imageApiDialect <id>    OpenAI-compatible image dialect: openai-native|ratio-metadata
   --response-format file|url  Output mode: file (download image, default) or url (return URL text)
-  --ref <files...>          Reference images (Google, Vertex, OpenAI, Azure, OpenRouter, Replicate supported families, MiniMax, Seedream 4.0/4.5/5.0, DashScope wan2.7-image*/qwen-image-2.0*/qwen-image-edit* with --provider dashscope, or SiliconFlow Qwen/Qwen-Image-Edit* with --provider siliconflow)
+  --ref <files...>          Reference images (Google, Vertex, OpenAI, Azure, OpenRouter, Replicate supported families, MiniMax, Seedream 4.0/4.5/5.0, DashScope wan2.7-image*/qwen-image-2.0*/qwen-image-edit* with --provider dashscope, SiliconFlow Qwen/Qwen-Image-Edit* with --provider siliconflow, codex-cli, or agy-cli up to 3 images)
   --n <count>               Number of images for the current task (default: 1; Replicate currently requires 1)
   --json                    JSON output
   -h, --help                Show help
@@ -185,6 +186,11 @@ Environment variables:
   BAOYU_CODEX_IMAGEGEN_TIMEOUT_MS  Per-attempt codex exec timeout for codex-cli provider (default: 300000)
   BAOYU_CODEX_IMAGEGEN_RETRIES  Codex-side retry attempts on retryable errors (default: 2)
   BAOYU_CODEX_IMAGEGEN_LOG_FILE  Append JSONL diagnostic log for codex-cli provider
+  BAOYU_AGY_IMAGEGEN_BIN    Path to agy-imagegen wrapper (default: bundled scripts/agy-imagegen/main.ts)
+  BAOYU_AGY_IMAGEGEN_CACHE_DIR  Enable idempotency cache for agy-cli provider (default: disabled)
+  BAOYU_AGY_IMAGEGEN_TIMEOUT_MS  Per-attempt agy timeout for agy-cli provider (default: 300000)
+  BAOYU_AGY_IMAGEGEN_RETRIES  agy-side retry attempts on retryable errors (default: 2)
+  BAOYU_AGY_IMAGEGEN_LOG_FILE  Append JSONL diagnostic log for agy-cli provider
 
 Env file load order: CLI args > EXTEND.md > process.env > <cwd>/.baoyu-skills/.env > ~/.baoyu-skills/.env`);
 }
@@ -458,6 +464,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
           seedream: null,
           azure: null,
           "codex-cli": null,
+          "agy-cli": null,
           agnes: null,
           vertex: null,
         };
@@ -717,11 +724,12 @@ export function detectProvider(args: CliArgs): Provider {
     args.provider !== "dashscope" &&
     args.provider !== "siliconflow" &&
     args.provider !== "codex-cli" &&
+    args.provider !== "agy-cli" &&
     args.provider !== "agnes" &&
     args.provider !== "vertex"
   ) {
     throw new Error(
-      "Reference images require a ref-capable provider. Use --provider google (Gemini multimodal), --provider vertex (Vertex Gemini multimodal), --provider openai (GPT Image edits), --provider azure (Azure OpenAI), --provider openrouter (OpenRouter multimodal), --provider replicate, --provider dashscope with a supported qwen/wan model, --provider siliconflow with a Qwen image edit model, --provider seedream for supported Seedream models, --provider minimax for MiniMax subject-reference workflows, --provider codex-cli (Codex image_gen with references), or --provider agnes (Agnes Image)."
+      "Reference images require a ref-capable provider. Use --provider google (Gemini multimodal), --provider vertex (Vertex Gemini multimodal), --provider openai (GPT Image edits), --provider azure (Azure OpenAI), --provider openrouter (OpenRouter multimodal), --provider replicate, --provider dashscope with a supported qwen/wan model, --provider siliconflow with a Qwen image edit model, --provider seedream for supported Seedream models, --provider minimax for MiniMax subject-reference workflows, --provider codex-cli (Codex image_gen with references), --provider agy-cli (agy generate_image with up to 3 references), or --provider agnes (Agnes Image)."
     );
   }
 
@@ -888,6 +896,7 @@ async function loadProviderModule(provider: Provider): Promise<ProviderModule> {
   if (provider === "seedream") return (await import("./providers/seedream")) as ProviderModule;
   if (provider === "azure") return (await import("./providers/azure")) as ProviderModule;
   if (provider === "codex-cli") return (await import("./providers/codex-cli")) as ProviderModule;
+  if (provider === "agy-cli") return (await import("./providers/agy-cli")) as ProviderModule;
   if (provider === "agnes") return (await import("./providers/agnes")) as ProviderModule;
   return (await import("./providers/openai")) as ProviderModule;
 }
@@ -923,6 +932,7 @@ export function getModelForProvider(
     if (provider === "seedream" && extendConfig.default_model.seedream) return extendConfig.default_model.seedream;
     if (provider === "azure" && extendConfig.default_model.azure) return extendConfig.default_model.azure;
     if (provider === "codex-cli" && extendConfig.default_model["codex-cli"]) return extendConfig.default_model["codex-cli"];
+    if (provider === "agy-cli" && extendConfig.default_model["agy-cli"]) return extendConfig.default_model["agy-cli"];
     if (provider === "agnes" && extendConfig.default_model.agnes) return extendConfig.default_model.agnes;
   }
   if (provider === "vertex" && process.env.VERTEX_IMAGE_MODEL) {

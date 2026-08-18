@@ -22,6 +22,7 @@ export const PROVIDERS = [
   "seedream",
   "azure",
   "codex-cli",
+  "agy-cli",
   "agnes",
   "vertex",
 ] as const;
@@ -97,6 +98,7 @@ export type ExtendConfig = {
     seedream: string | null;
     azure: string | null;
     "codex-cli": string | null;
+    "agy-cli": string | null;
     agnes: string | null;
     vertex: string | null;
   };

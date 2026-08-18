@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "fs";
-import { join, basename, extname } from "path";
+import { join, basename } from "path";
 import PptxGenJS from "pptxgenjs";
 
 interface SlideInfo {
@@ -89,8 +89,13 @@ async function createPptx(slides: SlideInfo[], outputPath: string) {
     const s = pptx.addSlide();
     const imageData = readFileSync(slide.path);
     const base64 = imageData.toString("base64");
-    const ext = extname(slide.filename).toLowerCase().replace(".", "");
-    const mimeType = ext === "png" ? "image/png" : "image/jpeg";
+    // Detect from actual bytes, not the filename extension: a backend like
+    // agy-cli always writes JPEG bytes even when the caller asked for a
+    // `.png` output path (its generate_image tool has no PNG option), so
+    // trusting the extension here would mislabel the data URI's MIME type
+    // and PptxGenJS/PowerPoint would fail to decode the embedded image.
+    const isPng = imageData[0] === 0x89 && imageData[1] === 0x50 && imageData[2] === 0x4e && imageData[3] === 0x47;
+    const mimeType = isPng ? "image/png" : "image/jpeg";
 
     s.addImage({
       data: `data:${mimeType};base64,${base64}`,
