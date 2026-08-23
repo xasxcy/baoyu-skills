@@ -26,6 +26,17 @@ export interface AgyRunResult {
   usage: TokenUsage | null;
   rawLogPath: string;
   durationMs: number;
+  // agy's own top-level status (e.g. "SUCCESS", "ERROR"). Defaults to
+  // "SUCCESS" when agy omits the field, matching agy's own implicit
+  // success-unless-stated-otherwise convention. Callers decide what to do
+  // with a non-SUCCESS status — this wrapper no longer throws on it, since
+  // agy can report ERROR (e.g. an internal 429) even after generate_image
+  // actually ran and saved a file.
+  status: string;
+  // agy's raw `error` field, verbatim. This is where agy puts the real
+  // diagnostic text (response is often an empty/meaningless placeholder on
+  // a non-SUCCESS status) — null when agy didn't set one (typically SUCCESS).
+  rawError: string | null;
 }
 
 export interface GenerateResult {

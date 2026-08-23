@@ -129,16 +129,20 @@ export async function runAgyExec(input: SpawnInput): Promise<AgyRunResult> {
     );
   }
 
-  if (parsed.status && parsed.status !== "SUCCESS") {
-    throw new GenError("agent_refused", buildStatusErrorMessage(parsed));
-  }
-
+  // Whether a non-SUCCESS status is actually a failure is decided by the
+  // caller, not here: agy can report ERROR (e.g. an internal 429 hit while
+  // calling its upstream image backend) even after generate_image already
+  // ran and saved a file. The caller (main.ts's attemptGenerate) verifies
+  // via the transcript + saved file before deciding, so this always returns
+  // a result rather than throwing on status alone.
   return {
     conversationId: parsed.conversation_id ?? null,
     responseText: parsed.response ?? null,
     usage: toTokenUsage(parsed.usage),
     rawLogPath,
     durationMs: Date.now() - start,
+    status: parsed.status ?? "SUCCESS",
+    rawError: parsed.error ?? null,
   };
 }
 

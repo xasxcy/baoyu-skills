@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
-import { GenError, type CliOptions, type GenerateResult } from "./types.ts";
-import { runAgyExec } from "./spawn.ts";
+import { GenError, type CliOptions, type GenerateResult, type AgyRunResult } from "./types.ts";
+import { runAgyExec, buildStatusErrorMessage } from "./spawn.ts";
 import { verifyGeneration, verifySourceImage, copyOutputAtomic } from "./validator.ts";
 import { cacheKey, lookupCache, storeCache } from "./cache.ts";
 import { JsonLogger } from "./logger.ts";
@@ -195,6 +195,53 @@ export async function snapshotRefs(refImages: string[]): Promise<{ paths: string
   }
 }
 
+// agy's top-level status is not trusted on its own in either direction — it
+// can report ERROR (e.g. an internal 429 while calling its upstream image
+// backend) even after generate_image already ran and saved a file. So a
+// non-SUCCESS status doesn't short-circuit: this always runs the same
+// transcript+file verification a SUCCESS status would go through, and only
+// treats the run as a real failure if that verification itself fails.
+// Exported (and taking `run` rather than calling runAgyExec itself) so this
+// decision logic is unit-testable without spawning the real `agy` binary.
+export async function resolveGenerationFromRun(
+  run: AgyRunResult,
+  outputPath: string,
+  log: JsonLogger,
+): Promise<{ bytes: number; conversationId: string | null; usage: AgyRunResult["usage"] }> {
+  let sourcePath: string;
+  try {
+    ({ sourcePath } = await verifyGeneration(run.conversationId));
+    await verifySourceImage(sourcePath);
+  } catch (verifyErr) {
+    if (run.status !== "SUCCESS") {
+      // Verification couldn't recover an actual saved image, and agy itself
+      // reported non-SUCCESS — this is a real failure. Surface agy's own
+      // diagnostic text (rawError), not the generic verification error.
+      throw new GenError(
+        "agent_refused",
+        buildStatusErrorMessage({ status: run.status, response: run.responseText ?? undefined, error: run.rawError ?? undefined }),
+      );
+    }
+    throw verifyErr;
+  }
+  const bytes = await copyOutputAtomic(sourcePath, outputPath);
+
+  if (run.status !== "SUCCESS") {
+    // agy reported a failure (status/rawError below) but verification just
+    // proved generate_image really ran and really saved a valid image — a
+    // false negative from agy's own status field. Logged distinctly so we
+    // can measure how often this happens and whether it's worth reporting
+    // upstream to Antigravity.
+    await log.info("status_error_but_recovered", {
+      status: run.status,
+      rawError: run.rawError,
+      conversation_id: run.conversationId,
+    });
+  }
+
+  return { bytes, conversationId: run.conversationId, usage: run.usage };
+}
+
 async function attemptGenerate(
   opts: CliOptions,
   instruction: string,
@@ -212,15 +259,12 @@ async function attemptGenerate(
   await log.info("agy.completed", {
     duration_ms: run.durationMs,
     conversation_id: run.conversationId,
+    status: run.status,
     usage: run.usage,
     raw_log: run.rawLogPath,
   });
 
-  const { sourcePath } = await verifyGeneration(run.conversationId);
-  await verifySourceImage(sourcePath);
-  const bytes = await copyOutputAtomic(sourcePath, opts.outputPath);
-
-  return { bytes, conversationId: run.conversationId, usage: run.usage };
+  return resolveGenerationFromRun(run, opts.outputPath, log);
 }
 
 async function generate(opts: CliOptions, log: JsonLogger): Promise<GenerateResult> {
