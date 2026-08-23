@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { CliArgs } from "../types.ts";
 import {
+  buildWrapperError,
   getDefaultModel,
   getDefaultOutputExtension,
   validateArgs,
@@ -70,4 +71,52 @@ test("agy-cli validateArgs rejects more than 3 reference images", () => {
       ),
     /at most 3 reference images/,
   );
+});
+
+test("agy-cli buildWrapperError marks a 429/RESOURCE_EXHAUSTED refusal as retryable (no 'Invalid ' prefix) and keeps the real error text", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "agent_refused",
+    error:
+      'agy reported status=ERROR:  | error: failed to generate content: 429 Too Many Requests, body: {"error":{"code":429,"message":"You have exhausted your capacity on this model.","status":"RESOURCE_EXHAUSTED","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}',
+  });
+  assert.doesNotMatch(err.message, /^Invalid /);
+  assert.match(err.message, /RESOURCE_EXHAUSTED/);
+  assert.match(err.message, /429 Too Many Requests/);
+});
+
+test("agy-cli buildWrapperError keeps a genuine (non-rate-limit) agent_refused non-retryable, with error text preserved", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "agent_refused",
+    error: "agy reported status=ERROR: content policy violation, cannot generate this image",
+  });
+  assert.match(err.message, /^Invalid agy-cli result \(agent_refused\)/);
+  assert.match(err.message, /content policy violation/);
+});
+
+test("agy-cli buildWrapperError keeps other error_kinds non-retryable and preserves their message", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "timeout",
+    error: "agy exceeded 300000ms (log: /tmp/agy-imggen-xyz/stdout.json)",
+  });
+  assert.match(err.message, /^Invalid agy-cli result \(timeout\)/);
+  assert.match(err.message, /agy exceeded 300000ms/);
+});
+
+test("agy-cli buildWrapperError handles a missing error field without throwing", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "malformed_json",
+  } as any);
+  assert.match(err.message, /^Invalid agy-cli result \(malformed_json\)/);
 });

@@ -3,7 +3,7 @@ import { writeFile, mkdtemp, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { GenError, type AgyRunResult } from "./types.ts";
-import { parseAgyStdout, parseTranscript, toTokenUsage } from "./parser.ts";
+import { parseAgyStdout, parseTranscript, toTokenUsage, type AgyStdoutJson } from "./parser.ts";
 
 export interface SpawnInput {
   instruction: string;
@@ -24,6 +24,16 @@ export function antigravityHome(): string {
 
 export function brainDir(conversationId: string): string {
   return path.join(antigravityHome(), "brain", conversationId);
+}
+
+// `response` is often empty or a meaningless placeholder ("OK") on a
+// non-SUCCESS status — `error` is where agy actually puts the diagnostic
+// text (e.g. the raw upstream 429 RESOURCE_EXHAUSTED body). Exported so
+// callers get a real diagnosis without re-running agy by hand, and so this
+// formatting is unit-testable without spawning a process.
+export function buildStatusErrorMessage(parsed: Pick<AgyStdoutJson, "status" | "response" | "error">): string {
+  const detail = parsed.error ? ` | error: ${parsed.error}` : "";
+  return `agy reported status=${parsed.status}: ${parsed.response ?? ""}${detail}`;
 }
 
 export async function runAgyExec(input: SpawnInput): Promise<AgyRunResult> {
@@ -120,7 +130,7 @@ export async function runAgyExec(input: SpawnInput): Promise<AgyRunResult> {
   }
 
   if (parsed.status && parsed.status !== "SUCCESS") {
-    throw new GenError("agent_refused", `agy reported status=${parsed.status}: ${parsed.response ?? ""}`);
+    throw new GenError("agent_refused", buildStatusErrorMessage(parsed));
   }
 
   return {

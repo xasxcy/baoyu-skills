@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { mkdir, readFile, rm, writeFile, access } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import type { CliArgs } from "../types";
+import { isRateLimitError } from "../global-queue";
 
 const PROVIDER_FILE = fileURLToPath(import.meta.url);
 const SCRIPTS_DIR = path.resolve(path.dirname(PROVIDER_FILE), "..");
@@ -109,6 +110,23 @@ async function spawnWrapper(wrapperPath: string, cliArgs: string[]): Promise<Spa
   });
 }
 
+// The wrapper already retries `agent_refused` internally (BAOYU_AGY_IMAGEGEN_RETRIES),
+// so most wrapper errors reaching here are genuinely exhausted — prefixing
+// with "Invalid " is deliberate, it makes main.ts's isRetryableGenerationError
+// treat them as non-retryable (a second full agy cold-start would just add
+// latency for the same outcome). The one exception is a rate limit
+// (agy's `error` field carrying an upstream 429/RESOURCE_EXHAUSTED/rate-limit
+// body): that's a *different* quota pool than baoyu-image-gen's own, so it's
+// worth letting the outer retry/429-cooldown machinery in main.ts and
+// global-queue.ts have a go rather than failing the whole task outright.
+export function buildWrapperError(parsed: WrapperErrorResult): Error {
+  const detail = `${parsed.error_kind}): ${parsed.error}`;
+  if (parsed.error_kind === "agent_refused" && isRateLimitError(parsed.error)) {
+    return new Error(`agy-cli rate limited (${detail}`);
+  }
+  return new Error(`Invalid agy-cli result (${detail}`);
+}
+
 function parseWrapperJson(stdout: string): WrapperResult {
   const trimmed = stdout.trim();
   if (!trimmed) {
@@ -190,9 +208,7 @@ export async function generateImage(
     const parsed = parseWrapperJson(spawnResult.stdout);
 
     if (parsed.status === "error") {
-      throw new Error(
-        `Invalid agy-cli result (${parsed.error_kind}): ${parsed.error}`,
-      );
+      throw buildWrapperError(parsed);
     }
 
     if (spawnResult.code !== 0) {

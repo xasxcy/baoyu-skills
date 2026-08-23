@@ -38,6 +38,12 @@ export interface AgyStdoutJson {
   conversation_id?: string;
   status?: string;
   response?: string;
+  // Populated by agy on failure (e.g. an upstream 429 RESOURCE_EXHAUSTED
+  // from cloudcode-pa.googleapis.com) with the real diagnostic text.
+  // `response` is frequently empty or a meaningless placeholder like "OK"
+  // on these paths, so `error` is what actually explains a non-SUCCESS
+  // status.
+  error?: string;
   duration_seconds?: number;
   usage?: {
     input_tokens?: number;
