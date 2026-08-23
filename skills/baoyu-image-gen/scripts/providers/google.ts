@@ -251,9 +251,12 @@ async function generateWithGemini(
   }
   parts.push({ text: promptWithAspect });
 
-  const imageConfig: { imageSize: "1K" | "2K" | "4K" } = {
+  const imageConfig: { imageSize: "1K" | "2K" | "4K"; aspectRatio?: string } = {
     imageSize: getGoogleImageSize(args),
   };
+  if (args.aspectRatio) {
+    imageConfig.aspectRatio = args.aspectRatio;
+  }
 
   console.log("Generating image with Gemini...", imageConfig);
   const response = await postGoogleJson<{
@@ -496,9 +499,12 @@ async function generateWithVertex(
   }
   parts.push({ text: promptWithAspect });
 
-  const imageConfig: { imageSize: "1K" | "2K" | "4K" } = {
+  const imageConfig: { imageSize: "1K" | "2K" | "4K"; aspectRatio?: string } = {
     imageSize: getGoogleImageSize(args),
   };
+  if (args.aspectRatio) {
+    imageConfig.aspectRatio = args.aspectRatio;
+  }
 
   console.log(`Generating image with Vertex AI (${normalizedModel})...`, imageConfig);
 
