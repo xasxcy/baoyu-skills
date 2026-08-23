@@ -54,6 +54,10 @@ The wrapper emits a single JSON line on stdout. On failure:
 
 The provider re-throws each wrapper error as `Invalid agy-cli result (<error_kind>): <message>`. The `"Invalid "` prefix triggers `isRetryableGenerationError` to mark it **non-retryable** in baoyu-image-gen's outer retry loop — the wrapper has already retried internally per `BAOYU_AGY_IMAGEGEN_RETRIES`, so re-spawning agy from main.ts would only multiply latency without changing the outcome.
 
+**One exception:** when `error_kind` is `agent_refused` and the wrapper's `error` text matches a rate limit (`RESOURCE_EXHAUSTED`, `429`, `rate limit`, or `quota ... exceed`), the provider drops the `"Invalid "` prefix — e.g. `agy-cli rate limited (agent_refused): <message>` — so the message flows into the outer retry loop and `global-queue.ts`'s 429 cooldown instead of failing outright. A rate limit here is agy's **own Antigravity account quota** on its underlying model (e.g. `cloudcode-pa.googleapis.com` / `gemini-3.1-flash-image`, seen with a short `quotaResetDelay` of a few seconds) — a completely different pool from any Vertex/OpenAI quota baoyu-image-gen manages itself, so it is worth letting the outer machinery wait and retry rather than treating it as a hard content refusal.
+
+For `status != SUCCESS`, the wrapper's error message now always includes agy's raw `error` field (when present), not just the frequently-empty-or-placeholder (`"OK"`) `response` field — so a failure is diagnosable from the reported message alone, without needing to re-run `agy` by hand to see what actually happened.
+
 `error_kind` values to expect:
 
 | Kind | Cause | Action |
@@ -66,7 +70,7 @@ The provider re-throws each wrapper error as `Invalid agy-cli result (<error_kin
 | `no_image_gen_tool_use` | Agent answered without calling `generate_image`, or the saved-file path couldn't be located in the transcript | Often transient — retry. If persistent, refine the prompt. |
 | `output_missing` | Transcript said a file was saved but it's gone on disk | Retry; check disk space. |
 | `invalid_jpeg` | Agent reported success but the file is absent or not a valid JPEG/PNG | Retry; check disk space. |
-| `agent_refused` | agy reported a non-`SUCCESS` status, or produced no `conversation_id` | Adjust the prompt; surface the refusal to the user. |
+| `agent_refused` | agy reported a non-`SUCCESS` status, or produced no `conversation_id`. Message now includes agy's raw `error` field — check it first: if it's a 429/`RESOURCE_EXHAUSTED` from agy's own quota (see above), this is retried automatically by the outer loop; otherwise it's a genuine refusal — adjust the prompt or surface it to the user. | Read the `error` text before assuming it's a content refusal; adjust the prompt or surface it to the user if it isn't a rate limit. |
 | `malformed_json` | agy's `--output-format json` stdout couldn't be parsed even after control-character sanitization | Retry; if persistent, file an issue with the raw log. |
 
 ## Trade-offs
