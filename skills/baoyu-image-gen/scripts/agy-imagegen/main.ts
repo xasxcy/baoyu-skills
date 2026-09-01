@@ -147,23 +147,21 @@ async function loadPrompt(opts: CliOptions): Promise<string> {
 
 function buildInstruction(prompt: string, opts: CliOptions): string {
   const refBlock = opts.refImages.length > 0
-    ? `\nREFERENCE IMAGES: pass these absolute paths as the ImagePaths argument (in this order): ${opts.refImages.map((p) => `"${p}"`).join(", ")}\n`
+    ? `\nReference image file paths to pass into the ImagePaths array parameter:\n${opts.refImages.map((p) => `- ${p}`).join("\n")}\n`
     : "";
-  return `You have an internal tool called generate_image. Call it EXACTLY ONCE, before doing anything else, with:
-- Prompt: the PROMPT below
-- AspectRatio: "${opts.aspect}"
-- ImageName: "agy_imagegen_output"
+  return `Please generate an image using your generate_image tool.
+
+Tool parameters:
+- Prompt: (use the PROMPT text below)
+- AspectRatio: ${opts.aspect}
+- ImageName: agy_imagegen_output
 ${refBlock}
+IMPORTANT: Pass ImagePaths as a string array of file paths. Pass AspectRatio as "${opts.aspect}".
+
 PROMPT:
 ${prompt}
 
-After the tool call completes, reply with only the word: OK
-
-HARD CONSTRAINTS:
-- Call generate_image exactly once. Do not call it again even if the result looks imperfect.
-- Do NOT use run_command, shell, or any file operation to copy, move, or inspect files.
-- Do NOT search the filesystem for pre-existing images.
-- Only generate_image produces the image; do not fabricate or describe a result without calling it.`;
+After calling generate_image, respond with: OK`;
 }
 
 // Only used when --cache-dir is set. Copies each ref to a private path we

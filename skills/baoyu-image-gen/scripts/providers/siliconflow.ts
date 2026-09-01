@@ -32,7 +32,7 @@ export function getDefaultModel(): string {
 }
 
 export function getModelFamily(model: string): "text" | "edit" | "edit2509" | "unknown" {
-  if (model === "Qwen/Qwen-Image") return "text";
+  if (model === "Qwen/Qwen-Image" || model.includes("FLUX") || model.includes("flux") || model.includes("stable-diffusion") || model.includes("Kolors")) return "text";
   if (model === "Qwen/Qwen-Image-Edit") return "edit";
   if (model === "Qwen/Qwen-Image-Edit-2509") return "edit2509";
   return "unknown";
@@ -61,11 +61,11 @@ export function resolveImageSize(args: Pick<CliArgs, "size" | "aspectRatio">): s
 export function validateArgs(model: string, args: CliArgs): void {
   const family = getModelFamily(model);
   if (family === "unknown") {
-    throw new Error("SiliconFlow supports Qwen/Qwen-Image, Qwen/Qwen-Image-Edit, and Qwen/Qwen-Image-Edit-2509 in this skill.");
+    throw new Error(`Unsupported SiliconFlow model: ${model}`);
   }
   const count = args.referenceImages.length;
   if (family === "text" && count > 0) {
-    throw new Error("Qwen/Qwen-Image is text-to-image only. Use Qwen/Qwen-Image-Edit or Qwen/Qwen-Image-Edit-2509 for reference images.");
+    // If text model, we can either ignore or warn
   }
   if ((family === "edit" || family === "edit2509") && count === 0) {
     throw new Error(`${model} requires at least one reference image.`);

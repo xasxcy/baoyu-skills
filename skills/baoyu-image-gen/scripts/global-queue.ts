@@ -296,6 +296,8 @@ async function withFileLock<T>(
   const started = nowFn();
   let handle: FileHandle | null = null;
 
+  await mkdir(path.dirname(lockPath), { recursive: true });
+
   while (true) {
     try {
       handle = await open(lockPath, "wx");

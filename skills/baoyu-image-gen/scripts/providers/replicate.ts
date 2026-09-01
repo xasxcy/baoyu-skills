@@ -25,6 +25,7 @@ export type ReplicateModelFamily =
   | "seedream5lite"
   | "wan27image"
   | "wan27imagepro"
+  | "flux"
   | "unknown";
 
 type PixelSize = {
@@ -76,6 +77,10 @@ export function getModelFamily(model: string): ReplicateModelFamily {
 
   if (normalized === "wan-video/wan-2.7-image-pro") {
     return "wan27imagepro";
+  }
+
+  if (normalized.includes("flux")) {
+    return "flux";
   }
 
   return "unknown";
@@ -364,6 +369,47 @@ function buildWanInput(
   return input;
 }
 
+function buildFluxInput(
+  model: string,
+  prompt: string,
+  args: CliArgs,
+  referenceImages: string[],
+): Record<string, unknown> {
+  const normalized = normalizeModelId(model);
+  const input: Record<string, unknown> = {
+    prompt,
+    output_format: "png",
+    output_quality: 95,
+  };
+
+  if (normalized.includes("flux-kontext")) {
+    input.safety_tolerance = 2;
+    if (referenceImages.length > 0) {
+      input.input_image = referenceImages[0];
+    }
+  } else if (normalized.includes("flux-2")) {
+    input.safety_tolerance = referenceImages.length > 0 ? 2 : 5;
+    input.resolution = "2 MP";
+    if (referenceImages.length > 0) {
+      input.input_images = referenceImages;
+    }
+  } else {
+    input.safety_tolerance = 6;
+    if (referenceImages.length > 0) {
+      input.image_prompt = referenceImages[0];
+    }
+  }
+
+  if (args.aspectRatio) {
+    validateDocumentedAspectRatio(model, args.aspectRatio);
+    input.aspect_ratio = args.aspectRatio;
+  } else {
+    input.aspect_ratio = "9:16";
+  }
+
+  return input;
+}
+
 export function validateArgs(model: string, args: CliArgs): void {
   parseModelId(model);
 
@@ -376,6 +422,13 @@ export function validateArgs(model: string, args: CliArgs): void {
   }
 
   const family = getModelFamily(model);
+
+  if (family === "flux") {
+    if (args.aspectRatio) {
+      validateDocumentedAspectRatio(model, args.aspectRatio);
+    }
+    return;
+  }
 
   if (family === "nano-banana") {
     if (args.referenceImages.length > 14) {
@@ -461,6 +514,10 @@ export function buildInput(
     return buildWanInput(family, prompt, args, referenceImages);
   }
 
+  if (family === "flux") {
+    return buildFluxInput(model, prompt, args, referenceImages);
+  }
+
   return { prompt };
 }
 
@@ -501,8 +558,9 @@ async function createPrediction(
   }
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiToken}`,
+    Authorization: "Bearer " + apiToken,
     "Content-Type": "application/json",
+    "User-Agent": "baoyu-image-gen/1.0",
   };
 
   if (sync) {
@@ -528,7 +586,10 @@ async function pollPrediction(apiToken: string, getUrl: string): Promise<Predict
 
   while (Date.now() - start < MAX_POLL_MS) {
     const res = await fetch(getUrl, {
-      headers: { Authorization: `Bearer ${apiToken}` },
+      headers: {
+        Authorization: "Bearer " + apiToken,
+        "User-Agent": "baoyu-image-gen/1.0",
+      },
     });
 
     if (!res.ok) {
