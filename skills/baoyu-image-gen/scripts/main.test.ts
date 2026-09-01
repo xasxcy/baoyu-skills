@@ -732,7 +732,7 @@ test("Vertex uses its documented default model when no override is configured", 
     getDefaultModel: () => "gemini-3-pro-image",
     generateImage: async () => new Uint8Array(),
   };
-  assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-preview");
+  assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3.1-flash-image");
   process.env.VERTEX_IMAGE_MODEL = "gemini-3-pro-image-custom";
   assert.equal(getModelForProvider("vertex", null, {}, providerModule), "gemini-3-pro-image-custom");
 });

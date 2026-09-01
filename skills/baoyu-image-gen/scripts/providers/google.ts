@@ -2,6 +2,7 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import type { CliArgs } from "../types";
+import type { VertexExecContext } from "./vertex-pool";
 
 const GOOGLE_MULTIMODAL_MODELS = [
   "gemini-3-pro-image",
@@ -443,17 +444,61 @@ function resolveGcloudBin(): string {
   );
 }
 
-function getVertexAccessToken(): string {
-  if (process.env.VERTEX_BEARER_TOKEN) return process.env.VERTEX_BEARER_TOKEN;
-  if (process.env.GOOGLE_ACCESS_TOKEN) return process.env.GOOGLE_ACCESS_TOKEN;
+/** gcloud access tokens last ~60 min; refresh well before that. */
+const VERTEX_TOKEN_TTL_MS = 45 * 60 * 1000;
+const vertexTokenCache = new Map<string, { token: string; fetchedAt: number }>();
+
+/** Test hook. */
+export function __clearVertexTokenCache(): void {
+  vertexTokenCache.clear();
+}
+
+/**
+ * Obtain a Vertex AI bearer token.
+ * - No `account`: env overrides (VERTEX_BEARER_TOKEN / GOOGLE_ACCESS_TOKEN) win,
+ *   else `gcloud auth print-access-token` for the active account (unchanged).
+ * - With `account`: always mints a token for that account via
+ *   `CLOUDSDK_CORE_ACCOUNT=<account> gcloud auth print-access-token` (this does
+ *   NOT change the user's active gcloud config), cached per-account.
+ */
+export function getVertexAccessToken(account?: string): string {
+  if (!account) {
+    // Accountless path: unchanged from before pooling. No caching here — an
+    // operator can `gcloud config set account ...` mid-run and the very next
+    // call must reflect it (also keeps env-token precedence intact).
+    if (process.env.VERTEX_BEARER_TOKEN) return process.env.VERTEX_BEARER_TOKEN;
+    if (process.env.GOOGLE_ACCESS_TOKEN) return process.env.GOOGLE_ACCESS_TOKEN;
+    try {
+      const token = execFileSync(resolveGcloudBin(), ["auth", "print-access-token"], {
+        encoding: "utf8",
+        timeout: 10000,
+      }).trim();
+      if (token) return token;
+    } catch {}
+    throw new Error(
+      "Failed to obtain Vertex AI access token via gcloud or environment variables.",
+    );
+  }
+
+  // Per-account path (pool nodes): cache by the explicit account only.
+  const cached = vertexTokenCache.get(account);
+  if (cached && Date.now() - cached.fetchedAt < VERTEX_TOKEN_TTL_MS) {
+    return cached.token;
+  }
   try {
     const token = execFileSync(resolveGcloudBin(), ["auth", "print-access-token"], {
       encoding: "utf8",
       timeout: 10000,
+      env: { ...process.env, CLOUDSDK_CORE_ACCOUNT: account },
     }).trim();
-    if (token) return token;
+    if (token) {
+      vertexTokenCache.set(account, { token, fetchedAt: Date.now() });
+      return token;
+    }
   } catch {}
-  throw new Error("Failed to obtain Vertex AI access token via gcloud or environment variables.");
+  throw new Error(
+    `Failed to obtain Vertex AI access token for account ${account} via gcloud.`,
+  );
 }
 
 export function getVertexProjectId(): string {
@@ -475,17 +520,34 @@ export function getVertexLocation(): string {
   return process.env.VERTEX_LOCATION || "global";
 }
 
-async function generateWithVertex(
+/**
+ * Errors that justify failing over to another pool node (transient / quota).
+ * Node-level permanent problems (400/401/403/404) return false — retrying on a
+ * different node would not help and would waste quota.
+ */
+export function isVertexFailoverError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  const statusMatch = msg.match(/Vertex AI error \((\d{3})\)/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    return status === 429 || (status >= 500 && status <= 504);
+  }
+  return /ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket|fetch failed|network|aborted|AbortError|timeout/i.test(
+    msg,
+  );
+}
+
+const VERTEX_REQUEST_TIMEOUT_MS = 180_000;
+
+/** Perform one Vertex :streamGenerateContent call against an explicit target. */
+async function doVertexRequest(
   prompt: string,
   model: string,
   args: CliArgs,
+  target: { projectId: string; location: string; token: string },
 ): Promise<Uint8Array> {
-  const token = getVertexAccessToken();
-  const projectId = getVertexProjectId();
-  const location = getVertexLocation();
   const normalizedModel = normalizeGoogleModelId(model);
-
-  const url = `https://aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${normalizedModel}:streamGenerateContent`;
+  const url = `https://aiplatform.googleapis.com/v1/projects/${target.projectId}/locations/${target.location}/publishers/google/models/${normalizedModel}:streamGenerateContent`;
 
   const promptWithAspect = addAspectRatioToPrompt(prompt, args.aspectRatio);
   const parts: Array<{
@@ -508,11 +570,14 @@ async function generateWithVertex(
 
   console.log(`Generating image with Vertex AI (${normalizedModel})...`, imageConfig);
 
+  // Bounded so a hung request can't hold the pool's L1 ownership lock past its
+  // stale-eviction horizon (see POOL_ALL_COOLED_MAX_WAIT_MS in main.ts).
   const res = await fetch(url, {
     method: "POST",
+    signal: AbortSignal.timeout(VERTEX_REQUEST_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${target.token}`,
     },
     body: JSON.stringify({
       contents: [
@@ -548,6 +613,57 @@ async function generateWithVertex(
   throw new Error(
     `No image in Vertex AI response. Diagnostics: ${JSON.stringify({ streamChunks: diagnostics })}`,
   );
+}
+
+/** Single-node path: resolve target from env / gcloud config (unchanged behavior). */
+async function generateWithVertex(
+  prompt: string,
+  model: string,
+  args: CliArgs,
+): Promise<Uint8Array> {
+  return doVertexRequest(prompt, model, args, {
+    projectId: getVertexProjectId(),
+    location: getVertexLocation(),
+    token: getVertexAccessToken(),
+  });
+}
+
+/** Pool path: caller supplies the exact project / location / account to use. */
+export async function generateWithVertexNode(
+  prompt: string,
+  model: string,
+  args: CliArgs,
+  ctx: VertexExecContext,
+): Promise<Uint8Array> {
+  const staticToken =
+    process.env.VERTEX_BEARER_TOKEN || process.env.GOOGLE_ACCESS_TOKEN || null;
+  const allowStatic = process.env.VERTEX_POOL_ALLOW_STATIC_TOKEN === "1";
+
+  if (ctx.account && staticToken && !allowStatic) {
+    throw new Error(
+      "Vertex pool node has an account but a global VERTEX_BEARER_TOKEN/GOOGLE_ACCESS_TOKEN is set; " +
+        "unset it, or set VERTEX_POOL_ALLOW_STATIC_TOKEN=1 to authorize that token for every configured pool project.",
+    );
+  }
+
+  // With the opt-in, the static token authorizes every project → use it directly
+  // and skip per-account minting.
+  const useStatic = !!staticToken && (!ctx.account || allowStatic);
+  const token = useStatic ? staticToken! : getVertexAccessToken(ctx.account);
+  const credSource = useStatic
+    ? "static-token"
+    : ctx.account
+      ? `account:${ctx.account}`
+      : "gcloud-default";
+  console.log(
+    `Vertex pool node project=${ctx.project} location=${ctx.location} cred=${credSource}`,
+  );
+
+  return doVertexRequest(prompt, model, args, {
+    projectId: ctx.project,
+    location: ctx.location,
+    token,
+  });
 }
 
 export async function generateImage(

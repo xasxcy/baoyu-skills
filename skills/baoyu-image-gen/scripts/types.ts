@@ -114,4 +114,10 @@ export type ExtendConfig = {
       >
     >;
   };
+  /** Vertex rotation pool: JSON array string of {account?,project,location?,weight?} nodes. */
+  vertex_pool_config?: string | null;
+  /** "round-robin" (default) | "weighted-random" */
+  vertex_pool_routing?: string | null;
+  /** Local per-node cooldown after a failover-class error (default 60). */
+  vertex_pool_cooldown_seconds?: number | null;
 };

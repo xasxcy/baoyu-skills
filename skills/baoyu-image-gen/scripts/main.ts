@@ -19,7 +19,9 @@ import {
   computeTaskHash,
   extractHttpStatus,
   isRateLimitError,
+  type AcquireResult,
 } from "./global-queue";
+import { getVertexPool, type VertexPool } from "./providers/vertex-pool";
 
 export type ProviderModule = {
   getDefaultModel: () => string;
@@ -147,7 +149,7 @@ Environment variables:
   OPENAI_IMAGE_MODEL        Default OpenAI model (gpt-image-2)
   OPENROUTER_IMAGE_MODEL    Default OpenRouter model (google/gemini-3.1-flash-image)
   GOOGLE_IMAGE_MODEL        Default Google model (gemini-3-pro-image)
-  VERTEX_IMAGE_MODEL        Default Vertex AI model (gemini-3-pro-image-preview)
+  VERTEX_IMAGE_MODEL        Default Vertex AI model (gemini-3.1-flash-image)
   DASHSCOPE_IMAGE_MODEL     Default DashScope model (qwen-image-2.0-pro)
   SILICONFLOW_IMAGE_MODEL   Default SiliconFlow model (Qwen/Qwen-Image)
   ZAI_IMAGE_MODEL           Default Z.AI model (glm-image)
@@ -450,6 +452,14 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
       } else if (key === "default_image_api_dialect") {
         config.default_image_api_dialect =
           value === "null" ? null : parseOpenAIImageApiDialect(value);
+      } else if (key === "vertex_pool_config") {
+        config.vertex_pool_config = value === "null" ? null : unwrapScalarQuotes(value);
+      } else if (key === "vertex_pool_routing") {
+        const cleaned = value.replace(/['"]/g, "");
+        config.vertex_pool_routing = cleaned === "null" ? null : cleaned;
+      } else if (key === "vertex_pool_cooldown_seconds") {
+        config.vertex_pool_cooldown_seconds =
+          value === "null" ? null : parseInt(value, 10);
       } else if (key === "default_model") {
         config.default_model = {
           google: null,
@@ -516,6 +526,18 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
   }
 
   return config;
+}
+
+/** Strip a single matching pair of wrapping quotes without touching inner chars. */
+export function unwrapScalarQuotes(value: string): string {
+  const v = value.trim();
+  if (
+    v.length >= 2 &&
+    ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"')))
+  ) {
+    return v.slice(1, -1);
+  }
+  return v;
 }
 
 export function parseOpenAIImageApiDialect(
@@ -938,7 +960,7 @@ export function getModelForProvider(
   if (provider === "vertex" && process.env.VERTEX_IMAGE_MODEL) {
     return process.env.VERTEX_IMAGE_MODEL;
   }
-  if (provider === "vertex") return "gemini-3-pro-image-preview";
+  if (provider === "vertex") return "gemini-3.1-flash-image";
   return providerModule.getDefaultModel();
 }
 
@@ -1136,9 +1158,253 @@ function taskHashFor(task: PreparedTask): string {
   });
 }
 
+export type PooledVertexDeps = {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Bound on how long selectNodeOrWait blocks while every node is cooling. */
+  maxWaitMs?: number;
+};
+
+const POOL_SELECT_POLL_MS = 15_000;
+// Overall budget for one pooled task while it holds the L1 ownership lock —
+// covers the all-nodes-cooling wait AND every L2 node-slot acquisition. Kept
+// well under the global queue's 20-minute STALE_INFLIGHT_MS (checked before
+// every node attempt and every inter-attempt backoff below) so L1 is never
+// pruned as "stale" while still legitimately held — which would let a second
+// process generate the same task concurrently. Per-request time is separately
+// bounded by VERTEX_REQUEST_TIMEOUT_MS in providers/google.ts, so the worst
+// case (budget + one in-flight request) stays comfortably under 20 minutes.
+const POOL_ALL_COOLED_MAX_WAIT_MS = 8 * 60 * 1000;
+/** Degenerate limits: L1 ownership slot is a dedup lock only, no gating. */
+const POOL_OWNERSHIP_LIMITS = { concurrency: 1_000_000, startIntervalMs: 0 };
+
+class AllNodesCoolingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AllNodesCoolingError";
+  }
+}
+
+/**
+ * Pick the next healthy pool node, or wait (bounded) while every node is on a
+ * persisted cooldown. Returns null once real attempts have already happened this
+ * outer attempt (let the outer loop do its normal backoff / MAX_ATTEMPTS).
+ */
+async function selectNodeOrWait(
+  pool: VertexPool,
+  model: string,
+  tried: Set<string>,
+  deadline: number,
+  deps: Required<PooledVertexDeps>,
+) {
+  for (;;) {
+    const node = pool.nextHealthyNode(deps.now(), tried);
+    if (node) return node;
+    if (tried.size > 0) return null;
+
+    const earliest = pool.earliestCooldownUntil(tried);
+    const wait = earliest - deps.now();
+    if (wait <= 0) continue;
+    if (deps.now() + wait > deadline) {
+      throw new AllNodesCoolingError(
+        `All Vertex pool nodes are cooling down; earliest availability in ${Math.round(
+          wait / 1000,
+        )}s exceeds the ${Math.round((deadline - (deps.now() - wait)) / 1000)}s wait budget.`,
+      );
+    }
+    await deps.sleep(Math.min(wait, POOL_SELECT_POLL_MS));
+    await pool.prewarm(model);
+  }
+}
+
+/**
+ * Vertex pool execution (PLAN_V3 §3.1): three layers —
+ *   L1 pool-wide ownership/dedup lock (held across the whole failover loop),
+ *   L2 per-node quota slot (reuses the global queue's concurrency + cooldown),
+ *   inner failover that tries each healthy node at most once per outer attempt.
+ */
+export async function generatePooledVertexTask(
+  task: PreparedTask,
+  pool: VertexPool,
+  limits: ProviderRateLimit,
+  useGlobalQueue: boolean = true,
+  depsIn?: PooledVertexDeps,
+): Promise<TaskResult> {
+  const deps: Required<PooledVertexDeps> = {
+    now: depsIn?.now ?? (() => Date.now()),
+    sleep: depsIn?.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    maxWaitMs: depsIn?.maxWaitMs ?? POOL_ALL_COOLED_MAX_WAIT_MS,
+  };
+  const hash = taskHashFor(task);
+  const google = await import("./providers/google");
+
+  // When the global queue is disabled, L1/L2 slots and cross-process cooldown
+  // sync are skipped; in-process node failover (the point of the pool) still runs.
+  const NOOP_SLOT: AcquireResult = { mode: "run", release: async () => {} };
+  const acquireOwnerSlot = (): Promise<AcquireResult> =>
+    useGlobalQueue
+      ? acquireGlobalSlot({
+          resourceKey: pool.dedupKey(task.model),
+          outputPath: task.outputPath,
+          taskHash: hash,
+          limits: POOL_OWNERSHIP_LIMITS,
+          now: deps.now,
+        })
+      : Promise.resolve(NOOP_SLOT);
+  const acquireNodeSlot = (nodeKey: string, maxWaitMs: number): Promise<AcquireResult> =>
+    useGlobalQueue
+      ? acquireGlobalSlot({
+          resourceKey: nodeKey,
+          outputPath: task.outputPath,
+          taskHash: hash,
+          limits,
+          now: deps.now,
+          // Bounded by the remaining L1 lifetime — see POOL_ALL_COOLED_MAX_WAIT_MS.
+          maxWaitMs: Math.max(1_000, maxWaitMs),
+        })
+      : Promise.resolve(NOOP_SLOT);
+  const ok = (attempts: number): TaskResult => ({
+    id: task.id,
+    provider: task.provider,
+    model: task.model,
+    outputPath: task.outputPath,
+    success: true,
+    attempts,
+    error: null,
+  });
+  const fail = (attempts: number, error: string): TaskResult => ({
+    id: task.id,
+    provider: task.provider,
+    model: task.model,
+    outputPath: task.outputPath,
+    success: false,
+    attempts,
+    error,
+  });
+
+  // L1: pool-wide ownership. Independent of any node key so identical concurrent
+  // tasks across processes dedupe here rather than double-generating.
+  const owner = await acquireOwnerSlot();
+  if (owner.mode === "joined") {
+    if (path.resolve(owner.outputPath) !== path.resolve(task.outputPath)) {
+      await copyImageAtomic(owner.outputPath, task.outputPath);
+    }
+    console.error(`[${task.id}] Reused in-flight pool result → ${task.outputPath}`);
+    return ok(1);
+  }
+
+  let attempts = 0;
+  try {
+    if (useGlobalQueue) await pool.prewarm(task.model);
+    const deadline = deps.now() + deps.maxWaitMs;
+    let lastError = "Unknown failure";
+
+    while (attempts < MAX_ATTEMPTS) {
+      attempts += 1;
+      const tried = new Set<string>();
+      let progressed = false;
+
+      for (;;) {
+        let node;
+        try {
+          node = await selectNodeOrWait(pool, task.model, tried, deadline, deps);
+        } catch (error) {
+          if (error instanceof AllNodesCoolingError) {
+            await owner.release({ kind: "cancelled" });
+            return fail(attempts, error.message);
+          }
+          throw error;
+        }
+        if (!node) break; // real attempts already made this round → outer backoff
+
+        if (deps.now() >= deadline) {
+          await owner.release({ kind: "cancelled" });
+          return fail(
+            attempts,
+            `Vertex pool ownership deadline exceeded (${Math.round(deps.maxWaitMs / 1000)}s budget) before a node slot was available.`,
+          );
+        }
+
+        progressed = true;
+        const nodeKey = pool.resourceKeyFor(node, task.model);
+        const slot = await acquireNodeSlot(nodeKey, deadline - deps.now());
+
+        if (slot.mode === "joined") {
+          if (path.resolve(slot.outputPath) !== path.resolve(task.outputPath)) {
+            await copyImageAtomic(slot.outputPath, task.outputPath);
+          }
+          await owner.release({ kind: "success" });
+          console.error(`[${task.id}] Reused in-flight node result → ${task.outputPath}`);
+          return ok(attempts);
+        }
+
+        try {
+          const imageData = await google.generateWithVertexNode(
+            task.prompt,
+            task.model,
+            task.args,
+            pool.ctxFor(node),
+          );
+          await writeImage(task.outputPath, imageData);
+          await slot.release({ kind: "success" });
+          await owner.release({ kind: "success" });
+          return ok(attempts);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = extractHttpStatus(error);
+          const hit429 = isRateLimitError(error) || status === 429;
+          await slot.release({ kind: "error", status, message, is429: hit429 });
+          lastError = message;
+
+          if (google.isVertexFailoverError(error)) {
+            pool.markCooldown(node.id, deps.now());
+            if (useGlobalQueue) await pool.syncCooldownFromQueue(node.id, nodeKey);
+            tried.add(node.id);
+            console.error(
+              `[${task.id}] node ${node.id} failed (${status ?? "?"}${
+                hit429 ? "/429" : ""
+              }); cooling down, trying next node...`,
+            );
+            continue; // inner: next healthy node
+          }
+
+          // Permanent / node-level error (400/401/403/404, prompt rejection…).
+          await owner.release({ kind: "cancelled" });
+          return fail(attempts, message);
+        }
+      }
+
+      const canRetry =
+        attempts < MAX_ATTEMPTS &&
+        deps.now() < deadline &&
+        isRetryableGenerationError(new Error(lastError));
+      if (progressed && canRetry) {
+        const delay = computeRetryDelayMs(attempts);
+        console.error(
+          `[${task.id}] All pool nodes exhausted on attempt ${attempts}/${MAX_ATTEMPTS}, retrying cycle in ${delay}ms...`,
+        );
+        await deps.sleep(delay);
+        continue;
+      }
+      break;
+    }
+
+    await owner.release({ kind: "cancelled" });
+    return fail(attempts, lastError);
+  } catch (error) {
+    // Anything that escapes the loop above (e.g. an L2 acquireGlobalSlot
+    // timeout) must still resolve to a TaskResult, matching the non-pool
+    // path's contract — never throw out of generatePooledVertexTask.
+    await owner.release({ kind: "cancelled" });
+    const message = error instanceof Error ? error.message : String(error);
+    return fail(attempts, message);
+  }
+}
+
 async function generatePreparedTask(
   task: PreparedTask,
-  providerRateLimits?: Record<Provider, ProviderRateLimit>
+  providerRateLimits?: Record<Provider, ProviderRateLimit>,
+  extendConfig?: Partial<ExtendConfig>
 ): Promise<TaskResult> {
   console.error(`Using ${task.provider} / ${task.model} for ${task.id}`);
   console.error(
@@ -1150,6 +1416,24 @@ async function generatePreparedTask(
   const resourceKey = resolveQueueResourceKey(task.provider, task.model);
   const hash = taskHashFor(task);
   const useGlobalQueue = !globalQueueDisabled();
+
+  if (task.provider === "vertex") {
+    const pool = getVertexPool(process.env, extendConfig);
+    if (pool) {
+      if (process.env.VERTEX_PROJECT_ID) {
+        console.error(
+          `[${task.id}] Note: VERTEX_PROJECT_ID is set but a Vertex pool is configured; the pool takes precedence and VERTEX_PROJECT_ID is ignored.`,
+        );
+      }
+      if (!useGlobalQueue) {
+        console.error(
+          `[${task.id}] Vertex pool active with the global queue disabled: cross-process dedup/cooldown are off; in-process account failover still applies.`,
+        );
+      }
+      console.error(`[${task.id}] Vertex pool: ${pool.size} nodes, key=${pool.dedupKey(task.model)}`);
+      return generatePooledVertexTask(task, pool, limits, useGlobalQueue);
+    }
+  }
 
   let attempts = 0;
   while (attempts < MAX_ATTEMPTS) {
@@ -1288,7 +1572,7 @@ export async function runBatchTasks(
   extendConfig: Partial<ExtendConfig>
 ): Promise<TaskResult[]> {
   if (tasks.length === 1) {
-    return [await generatePreparedTask(tasks[0]!, getConfiguredProviderRateLimits(extendConfig))];
+    return [await generatePreparedTask(tasks[0]!, getConfiguredProviderRateLimits(extendConfig), extendConfig)];
   }
 
   const maxWorkers = getConfiguredMaxWorkers(extendConfig);
@@ -1316,7 +1600,7 @@ export async function runBatchTasks(
       const task = tasks[currentIndex]!;
       const release = await acquireProvider(task.provider);
       try {
-        results[currentIndex] = await generatePreparedTask(task, providerRateLimits);
+        results[currentIndex] = await generatePreparedTask(task, providerRateLimits, extendConfig);
       } finally {
         release();
       }
@@ -1351,7 +1635,7 @@ function emitJson(payload: unknown): void {
 
 async function runSingleMode(args: CliArgs, extendConfig: Partial<ExtendConfig>): Promise<void> {
   const task = await prepareSingleTask(args, extendConfig);
-  const result = await generatePreparedTask(task, getConfiguredProviderRateLimits(extendConfig));
+  const result = await generatePreparedTask(task, getConfiguredProviderRateLimits(extendConfig), extendConfig);
   if (!result.success) {
     throw new Error(result.error || "Generation failed");
   }
