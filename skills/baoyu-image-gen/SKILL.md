@@ -146,6 +146,11 @@ When the user wants a person/object preserved from reference images:
 | `VERTEX_LOCATION` | Vertex AI location (default `global`) |
 | `VERTEX_BEARER_TOKEN` (alias `GOOGLE_ACCESS_TOKEN`) | Vertex AI access token; omit to use `gcloud auth print-access-token` |
 | `GCLOUD_BIN` | Path to the `gcloud` binary when it is not on `PATH` |
+| `VERTEX_POOL_CONFIG` | JSON array of `{account?, project, location?, weight?}` — enables multi-account/multi-project Vertex rotation (see below); overrides `VERTEX_PROJECT_ID` |
+| `VERTEX_PROJECT_IDS` | Comma-separated project ids sharing the current `gcloud` account — simple pool without per-node accounts |
+| `VERTEX_POOL_ROUTING` | `round-robin` (default) or `weighted-random` |
+| `VERTEX_POOL_COOLDOWN_SECONDS` | Local per-node cooldown after a failover-class error (default `60`) |
+| `VERTEX_POOL_ALLOW_STATIC_TOKEN` | Set `1` to let `VERTEX_BEARER_TOKEN`/`GOOGLE_ACCESS_TOKEN` authorize every pool node instead of erroring when a node has an `account` |
 | `DASHSCOPE_API_KEY` | DashScope API key |
 | `SILICONFLOW_API_KEY` | SiliconFlow (硅基流动) API key |
 | `ZAI_API_KEY` (alias `BIGMODEL_API_KEY`) | Z.AI API key |
@@ -231,6 +236,7 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 | Codex CLI (wraps bundled `scripts/codex-imagegen/`; Codex login, no `OPENAI_API_KEY`) | `references/providers/codex-cli.md` |
 | Antigravity CLI (wraps bundled `scripts/agy-imagegen/`; agy login, JPEG output, up to 3 refs) | `references/providers/agy-cli.md` |
 | Agnes (agnes-image-2.1-flash, reference-image support) | `references/providers/agnes.md` |
+| Vertex AI multi-account/project pool (rotation, 429 failover) | `references/providers/vertex-pool.md` |
 
 ## Provider Selection
 

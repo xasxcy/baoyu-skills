@@ -23,7 +23,7 @@ default_image_api_dialect: null  # openai-native|ratio-metadata|null (OpenAI-com
 
 default_model:
   google: null              # e.g., "gemini-3-pro-image", "gemini-3.1-flash-image"
-  vertex: null              # e.g., "gemini-3-pro-image-preview" (Vertex AI; default when unset)
+  vertex: null              # e.g., "gemini-3.1-flash-image" (Vertex AI; also the built-in default when unset)
   openai: null              # e.g., "gpt-image-2", "gpt-image-1.5", "gpt-image-1"
   azure: null               # Azure deployment name, e.g., "gpt-image-2" or "image-prod"
   openrouter: null          # e.g., "google/gemini-3.1-flash-image"
@@ -78,6 +78,10 @@ batch:
     agnes:
       concurrency: 3
       start_interval_ms: 1100
+
+vertex_pool_config: null    # JSON array string of {account?,project,location?,weight?} nodes — see references/providers/vertex-pool.md
+vertex_pool_routing: null   # round-robin|weighted-random|null (null = round-robin)
+vertex_pool_cooldown_seconds: null  # int|null (null = 60)
 ---
 ```
 
@@ -107,6 +111,9 @@ batch:
 | `batch.max_workers` | int\|null | 10 | Batch worker cap |
 | `batch.provider_limits.<provider>.concurrency` | int\|null | provider default | Max simultaneous requests per provider |
 | `batch.provider_limits.<provider>.start_interval_ms` | int\|null | provider default | Minimum gap between request starts per provider |
+| `vertex_pool_config` | string\|null | null | JSON array string of Vertex pool nodes; enables multi-account/project rotation — see `references/providers/vertex-pool.md` |
+| `vertex_pool_routing` | string\|null | null (→ round-robin) | `round-robin` or `weighted-random` |
+| `vertex_pool_cooldown_seconds` | int\|null | null (→ 60) | Local per-node cooldown after a failover-class error |
 
 ## Examples
 
@@ -131,7 +138,7 @@ default_image_size: 2K
 default_image_api_dialect: null
 default_model:
   google: "gemini-3-pro-image"
-  vertex: "gemini-3-pro-image-preview"
+  vertex: "gemini-3.1-flash-image"
   openai: "gpt-image-2"
   azure: "gpt-image-2"
   openrouter: "google/gemini-3.1-flash-image"
