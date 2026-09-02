@@ -61,6 +61,7 @@ export type ErrorKind =
   | "no_image_gen_tool_use"
   | "output_missing"
   | "invalid_jpeg"
+  | "quota_exhausted"
   | "agent_refused"
   | "malformed_json";
 
@@ -70,6 +71,9 @@ export const RETRYABLE: ReadonlySet<ErrorKind> = new Set([
   "no_image_gen_tool_use",
   "output_missing",
   "invalid_jpeg",
+  // agy's upstream image quota resets on a short delay (seconds), so a
+  // retry with backoff can succeed — unlike a content refusal.
+  "quota_exhausted",
   "agent_refused",
   "malformed_json",
 ]);

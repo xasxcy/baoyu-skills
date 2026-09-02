@@ -211,6 +211,13 @@ export async function resolveGenerationFromRun(
     ({ sourcePath } = await verifyGeneration(run.conversationId));
     await verifySourceImage(sourcePath);
   } catch (verifyErr) {
+    // A quota/429 signal recovered from the transcript is more actionable
+    // than the generic agent_refused rewrite below — preserve the distinct
+    // kind even when agy's own status is non-SUCCESS (the usual case on a
+    // real quota hit).
+    if (verifyErr instanceof GenError && verifyErr.kind === "quota_exhausted") {
+      throw verifyErr;
+    }
     if (run.status !== "SUCCESS") {
       // Verification couldn't recover an actual saved image, and agy itself
       // reported non-SUCCESS — this is a real failure. Surface agy's own

@@ -87,6 +87,20 @@ test("agy-cli buildWrapperError marks a 429/RESOURCE_EXHAUSTED refusal as retrya
   assert.match(err.message, /429 Too Many Requests/);
 });
 
+test("agy-cli buildWrapperError routes error_kind=quota_exhausted into the retryable rate-limit path", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "quota_exhausted",
+    error:
+      "调用 generate_image 生成图片失败：当前模型的配额已耗尽（429 Resource Exhausted / QUOTA_EXHAUSTED），请稍后重试。",
+  });
+  assert.doesNotMatch(err.message, /^Invalid /);
+  assert.match(err.message, /agy-cli rate limited \(quota_exhausted\)/);
+  assert.match(err.message, /QUOTA_EXHAUSTED/);
+});
+
 test("agy-cli buildWrapperError keeps a genuine (non-rate-limit) agent_refused non-retryable, with error text preserved", () => {
   const err = buildWrapperError({
     status: "error",

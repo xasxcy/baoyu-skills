@@ -121,7 +121,16 @@ async function spawnWrapper(wrapperPath: string, cliArgs: string[]): Promise<Spa
 // global-queue.ts have a go rather than failing the whole task outright.
 export function buildWrapperError(parsed: WrapperErrorResult): Error {
   const detail = `${parsed.error_kind}): ${parsed.error}`;
-  if (parsed.error_kind === "agent_refused" && isRateLimitError(parsed.error)) {
+  // `quota_exhausted` is the wrapper's explicit "agy's upstream image quota
+  // is spent" signal (recovered from the run transcript); `agent_refused` +
+  // rate-limit text is the older, less precise path to the same conclusion.
+  // Both are agy's own Antigravity quota pool — a different pool from any
+  // Vertex/OpenAI quota baoyu-image-gen manages — so let the outer
+  // retry/429-cooldown machinery have a go instead of failing outright.
+  if (
+    parsed.error_kind === "quota_exhausted" ||
+    (parsed.error_kind === "agent_refused" && isRateLimitError(parsed.error))
+  ) {
     return new Error(`agy-cli rate limited (${detail}`);
   }
   return new Error(`Invalid agy-cli result (${detail}`);

@@ -133,3 +133,33 @@ export function extractSavedImagePath(steps: TranscriptStep[]): string | null {
   }
   return null;
 }
+
+// A genuine quota / 429 RESOURCE_EXHAUSTED from agy's upstream image backend
+// no longer reliably lands in the top-level stdout `status`/`error` fields —
+// agy now writes the diagnostic into a transcript step's `content` (observed
+// in the PLANNER_RESPONSE step that reports the tool failure, e.g.
+// "...当前模型的配额已耗尽（429 Resource Exhausted / QUOTA_EXHAUSTED）...").
+// Without this, that case degrades to a generic `no_image_gen_tool_use` and
+// the caller can't tell "back off / rotate key" from "prompt refined".
+const QUOTA_ERROR_RE = /RESOURCE_EXHAUSTED|QUOTA_EXHAUSTED|\b429\b|Resource Exhausted/i;
+
+// Only scan steps that carry agy's own diagnostics. A GENERIC step echoes the
+// caller's prompt back as "Using prompt: <text>" (buildInstruction embeds it),
+// so a prompt that merely mentions "429" there must not read as a rate limit;
+// USER_INPUT is the raw prompt for the same reason. PLANNER_RESPONSE is where
+// the observed quota failure lands; ERROR_MESSAGE is agy's dedicated error
+// channel (both are among the step types seen across real transcripts).
+const QUOTA_SCAN_TYPES = new Set(["PLANNER_RESPONSE", "ERROR_MESSAGE"]);
+
+export function detectQuotaError(steps: TranscriptStep[]): string | null {
+  for (const s of steps) {
+    if (!s.content || !QUOTA_SCAN_TYPES.has(s.type)) continue;
+    // Belt and suspenders: even in a scanned step, cut anything after a
+    // "Using prompt:" marker so an echoed prompt can't trip the match.
+    const scanText = s.content.split("Using prompt:")[0];
+    for (const line of scanText.split("\n")) {
+      if (QUOTA_ERROR_RE.test(line)) return line.trim();
+    }
+  }
+  return null;
+}
