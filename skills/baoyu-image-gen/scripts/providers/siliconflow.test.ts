@@ -52,11 +52,13 @@ test("SiliconFlow defaults and size mapping use the documented Qwen settings", (
 });
 
 test("SiliconFlow validates the three supported Qwen model/ref combinations", () => {
-  assert.throws(() => validateArgs("Qwen/Qwen-Image", makeArgs({ referenceImages: ["a.png"] })), /text-to-image only/);
+  // A text-family model with stray reference images is tolerated (refs are dropped
+  // downstream) rather than rejected — see the FLUX/SD/Kolors routing in getModelFamily.
+  assert.doesNotThrow(() => validateArgs("Qwen/Qwen-Image", makeArgs({ referenceImages: ["a.png"] })));
   assert.throws(() => validateArgs("Qwen/Qwen-Image-Edit", makeArgs()), /requires at least one/);
   assert.throws(() => validateArgs("Qwen/Qwen-Image-Edit", makeArgs({ referenceImages: ["a.png", "b.png"] })), /exactly one/);
   assert.doesNotThrow(() => validateArgs("Qwen/Qwen-Image-Edit-2509", makeArgs({ referenceImages: ["a.png", "b.png", "c.png"] })));
-  assert.throws(() => validateArgs("Qwen/Other", makeArgs()), /supports Qwen/);
+  assert.throws(() => validateArgs("Qwen/Other", makeArgs()), /Unsupported SiliconFlow model/);
 });
 
 test("SiliconFlow request bodies use lowercase image_size and edit image fields", async (t) => {

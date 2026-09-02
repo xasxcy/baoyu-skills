@@ -248,7 +248,7 @@ test("SKILL.md frontmatter remains parseable and records the fork release versio
   const frontmatter = extractYamlFrontMatter(skill);
   assert.ok(frontmatter);
   assert.match(frontmatter, /^name: baoyu-image-gen$/m);
-  assert.match(frontmatter, /^version: 2\.2\.0$/m);
+  assert.match(frontmatter, /^version: 2\.2\.1$/m);
 });
 
 test("ensureDir creates nested dirs, is idempotent on an existing dir, and rethrows for a non-directory", async (t: TestContext) => {
