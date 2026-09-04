@@ -240,12 +240,15 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 
 ## Provider Selection
 
-1. `--ref` provided + no `--provider` → auto-select Google → OpenAI → Azure → OpenRouter → Replicate → Seedream → MiniMax → Agnes (MiniMax's subject reference is more specialized toward character/portrait consistency)
+**Precedence:** an explicit `--provider`, then a profile's `EXTEND.md` `default_provider`, then the rules below. Rule 0 covers the profile-default case; rules 1–4 only run when neither an explicit flag nor an `EXTEND.md` default applies.
+
+0. `EXTEND.md` sets `default_provider: <name>` → use it for any request that doesn't pass `--provider`, no separate authorization needed (the profile config *is* the authorization). This is the sanctioned way to make `codex-cli` or `agy-cli` a default (see rules 5–6). State the provider actually used. **The default is sticky on failure:** if it errors, surface the error and stop — do **not** silently retry the request on a different provider. A different provider means the prompt and any reference images go to another external service and a different account/quota gets billed, which needs its own authorization. Switch only on an explicit `--provider` for the retry or the user confirming a specific alternative in-conversation; rules 1–4 do not run as an automatic fallback.
+1. `--ref` provided + no `--provider` + no `EXTEND.md` default → auto-select Google → OpenAI → Azure → OpenRouter → Replicate → Seedream → MiniMax → Agnes (MiniMax's subject reference is more specialized toward character/portrait consistency)
 2. `--provider` specified → use it (if `--ref`, must be google/openai/azure/openrouter/replicate/seedream/minimax/codex-cli/agy-cli/agnes)
 3. Only one API key present → use that provider
 4. Multiple keys → default priority: Google → OpenAI → Azure → OpenRouter → DashScope → Z.AI → MiniMax → Replicate → Jimeng → Seedream → Agnes
-5. `codex-cli` is **never auto-selected** — set `default_provider: codex-cli` in EXTEND.md or pass `--provider codex-cli`. It spawns `codex exec` via the bundled `scripts/codex-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Codex subscription (no `OPENAI_API_KEY`). Requires `codex` on `PATH` with an active `codex login`.
-6. `agy-cli` is **never auto-selected** — set `default_provider: agy-cli` in EXTEND.md or pass `--provider agy-cli`. It spawns `agy -p ...` via the bundled `scripts/agy-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Antigravity subscription. Requires `agy` on `PATH` with an active login. Output is JPEG.
+5. `codex-cli` is **never chosen by rules 1–4** — it requires `default_provider: codex-cli` in EXTEND.md (rule 0) or an explicit `--provider codex-cli`. It spawns `codex exec` via the bundled `scripts/codex-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Codex subscription (no `OPENAI_API_KEY`). Requires `codex` on `PATH` with an active `codex login`.
+6. `agy-cli` is **never chosen by rules 1–4** — it requires `default_provider: agy-cli` in EXTEND.md (rule 0) or an explicit `--provider agy-cli`. It spawns `agy -p ...` via the bundled `scripts/agy-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Antigravity subscription. Requires `agy` on `PATH` with an active login. Output is JPEG.
 
 ## Quality Presets
 
@@ -298,7 +301,7 @@ Rule of thumb: once prompt files are saved and the task is "generate all of thes
 
 ### Codex image2 fallback
 
-If `--provider openai --model gpt-image-2` fails because `OPENAI_API_KEY` is missing but the current runtime has a native image-generation backend or the repo-level `codex-imagegen` wrapper is available, use that path rather than leaving the user waiting. Be explicit about whether the fallback is true reference-image generation or only a text-prompt reconstruction from extracted visual traits. See `references/codex-image2-fallback.md`.
+If `--provider openai --model gpt-image-2` can't run because `OPENAI_API_KEY` is missing, and the current runtime has a native image-generation backend or the repo-level `codex-imagegen` wrapper available: this is the same sticky-on-failure case as rule 0 above — a different backend is a different service and billing surface. Surface the missing-key error, name the available alternative (native tool / `codex-imagegen` — the latter uses the user's own Codex subscription), and use it only if the user confirms or they had already selected it via `--provider codex-cli` / `default_provider`. When you do use it, be explicit about whether it is true reference-image generation or only a text-prompt reconstruction from extracted visual traits. See `references/codex-image2-fallback.md`.
 
 ## References
 
