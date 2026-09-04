@@ -6,6 +6,9 @@ import {
   unwrapToolCallArg,
   hasGenerateImageInvocation,
   extractSavedImagePath,
+  detectQuotaError,
+  detectLocationError,
+  detectLocationErrorInSteps,
 } from "./parser.ts";
 
 // Real (sanitized) `agy -p ... --output-format json` stdout, captured from a
@@ -108,4 +111,71 @@ test("extractSavedImagePath matches without a trailing sentence period", () => {
 test("extractSavedImagePath matches a quoted path containing spaces", () => {
   const step = '{"step_index":0,"status":"DONE","type":"GENERATE_IMAGE","content":"Generated image is saved at \\"/tmp/my folder/out.png\\"."}';
   expect(extractSavedImagePath(parseTranscript(step))).toBe("/tmp/my folder/out.png");
+});
+
+// --- detectQuotaError (agy's upstream image quota / 429) ---
+
+test("detectQuotaError surfaces a 429 / RESOURCE_EXHAUSTED line from a PLANNER_RESPONSE step", () => {
+  const steps = parseTranscript(
+    '{"step_index":0,"status":"DONE","type":"PLANNER_RESPONSE","content":"generate_image failed: 429 Resource Exhausted / RESOURCE_EXHAUSTED, quota will reset shortly"}',
+  );
+  expect(detectQuotaError(steps)).toMatch(/RESOURCE_EXHAUSTED/);
+});
+
+test("detectQuotaError returns null for a clean success transcript", () => {
+  expect(detectQuotaError(parseTranscript(REAL_TRANSCRIPT))).toBeNull();
+});
+
+test("detectQuotaError ignores a '429' that only appears in the echoed USER_INPUT prompt", () => {
+  const steps = parseTranscript(
+    '{"step_index":0,"status":"DONE","type":"USER_INPUT","content":"make a poster explaining HTTP 429 RESOURCE_EXHAUSTED"}',
+  );
+  expect(detectQuotaError(steps)).toBeNull();
+});
+
+test("detectQuotaError ignores a '429' after a GENERIC step's 'Using prompt:' echo", () => {
+  const steps = parseTranscript(
+    '{"step_index":0,"status":"DONE","type":"ERROR_MESSAGE","content":"context\\nUsing prompt: a poster about 429 and RESOURCE_EXHAUSTED errors"}',
+  );
+  expect(detectQuotaError(steps)).toBeNull();
+});
+
+// --- detectLocationError / detectLocationErrorInSteps (Google's geo gate) ---
+
+// Real (trimmed) line from ~/.gemini/antigravity-cli/log/cli-<ts>.log on a
+// geo-gated model call.
+const REAL_SERVER_LOG_GEO_TAIL = [
+  "ERROR: logging before google.Init: I0904 09:35:38.2 1 conversation_manager.go:764] Streaming conversation daa1416b-740c-4f45-89b7-70ce0e5470e9",
+  "ERROR: logging before google.Init: E0904 09:35:39.4 429 errorreport.go:224] agent executor error: calling model: FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+  "ERROR: logging before google.Init: E0904 09:35:39.4 1 session.go:226] Print mode: run ended with error and no response: Agent execution terminated due to error.",
+].join("\n");
+
+test("detectLocationError pulls the geo-gate line out of a server-log tail", () => {
+  const hit = detectLocationError(REAL_SERVER_LOG_GEO_TAIL);
+  expect(hit).toMatch(/User location is not supported for the API use/);
+  expect(hit).toContain("FAILED_PRECONDITION");
+});
+
+test("detectLocationError returns null for text without the gate signature", () => {
+  expect(detectLocationError("just some ordinary log chatter\nnothing to see")).toBeNull();
+  expect(detectLocationError("")).toBeNull();
+});
+
+test("detectLocationError does not match a partial 'location is not supported' without the API-use tail", () => {
+  // Guards against a prompt like "draw a map where this location is not supported by roads".
+  expect(detectLocationError("this location is not supported by the transit map")).toBeNull();
+});
+
+test("detectLocationErrorInSteps matches agy's own PLANNER_RESPONSE diagnostic channel", () => {
+  const steps = parseTranscript(
+    '{"step_index":0,"status":"DONE","type":"PLANNER_RESPONSE","content":"calling model: FAILED_PRECONDITION (code 400): User location is not supported for the API use."}',
+  );
+  expect(detectLocationErrorInSteps(steps)).toMatch(/User location is not supported/);
+});
+
+test("detectLocationErrorInSteps ignores the same phrase echoed in a USER_INPUT prompt", () => {
+  const steps = parseTranscript(
+    '{"step_index":0,"status":"DONE","type":"USER_INPUT","content":"write docs about the error \'User location is not supported for the API use\'"}',
+  );
+  expect(detectLocationErrorInSteps(steps)).toBeNull();
 });

@@ -150,6 +150,7 @@ function fakeRun(overrides: Partial<AgyRunResult>): AgyRunResult {
     usage: null,
     rawLogPath: "/tmp/fake-log.json",
     durationMs: 100,
+    startedAtMs: Date.now() - 100,
     status: "SUCCESS",
     rawError: null,
     ...overrides,
@@ -247,6 +248,48 @@ test("resolveGenerationFromRun: SUCCESS status behaves exactly as before (no reg
       // path — resolveGenerationFromRun logs nothing here, so the log file
       // is never even created.
       await expect(readFile(logFile, "utf-8")).rejects.toThrow(/ENOENT/);
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("resolveGenerationFromRun: geo gate (empty transcript + geo line in server log) survives a non-SUCCESS status as location_not_supported, not agent_refused", async () => {
+  await withFakeHome(async (agyHomeDir) => {
+    await writeTranscript(
+      agyHomeDir,
+      CONVERSATION_ID,
+      [
+        '{"step_index":0,"status":"DONE","type":"USER_INPUT","content":"draw a cat"}',
+        '{"step_index":1,"status":"DONE","type":"PLANNER_RESPONSE"}',
+      ].join("\n"),
+    );
+    const logDir = path.join(agyHomeDir, "log");
+    await mkdir(logDir, { recursive: true });
+    await writeFile(
+      path.join(logDir, "cli-20260904_093533.log"),
+      `Streaming conversation ${CONVERSATION_ID}\n` +
+        "agent executor error: calling model: FAILED_PRECONDITION (code 400): User location is not supported for the API use.\n",
+      "utf-8",
+    );
+
+    const outDir = await mkdtemp(path.join(tmpdir(), "agy-out-"));
+    try {
+      const outputPath = path.join(outDir, "final.jpg");
+      const log = new JsonLogger(null, false);
+      // agy's own top-level status on this path is the generic ERROR.
+      const run = fakeRun({ status: "ERROR", rawError: "Agent execution terminated due to error." });
+
+      let caught: unknown;
+      try {
+        await resolveGenerationFromRun(run, outputPath, log);
+      } catch (e) {
+        caught = e;
+      }
+
+      expect(caught).toBeInstanceOf(GenError);
+      expect((caught as GenError).kind).toBe("location_not_supported");
+      expect((caught as GenError).retryable).toBe(false);
     } finally {
       await rm(outDir, { recursive: true, force: true });
     }

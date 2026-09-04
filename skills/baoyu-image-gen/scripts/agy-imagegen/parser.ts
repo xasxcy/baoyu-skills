@@ -163,3 +163,41 @@ export function detectQuotaError(steps: TranscriptStep[]): string | null {
   }
   return null;
 }
+
+// Google's geo/ASN gate on the model-call path. Real form, seen only in
+// agy's server log (`~/.gemini/antigravity-cli/log/cli-<ts>.log`), not in
+// the run's brain-dir transcript and not in the stdout JSON (whose
+// top-level `error` on this path is the generic "Agent execution
+// terminated due to error."):
+//   agent executor error: calling model: FAILED_PRECONDITION (code 400):
+//   User location is not supported for the API use.
+// The phrase is specific enough to match on its own; kept anchored to the
+// distinctive "for the API use" tail so a prompt that merely mentions
+// "location is not supported" can't trip it.
+const LOCATION_ERROR_RE = /user location is not supported for the API use/i;
+
+// Scan an arbitrary text blob (a server-log tail, or a transcript step's
+// content) line by line for the geo-gate signature. Returns the first
+// matching line, trimmed, or null. Pure + fs-free so it's unit-testable
+// without a real agy install.
+export function detectLocationError(text: string): string | null {
+  if (!text) return null;
+  for (const line of text.split("\n")) {
+    if (LOCATION_ERROR_RE.test(line)) return line.trim();
+  }
+  return null;
+}
+
+// Same gate, but reading agy's own transcript diagnostic channels — a
+// forward hedge in case agy starts surfacing it there like it now does for
+// quota. Same step-type allowlist and "Using prompt:" guard as
+// detectQuotaError so an echoed prompt can't trip it.
+export function detectLocationErrorInSteps(steps: TranscriptStep[]): string | null {
+  for (const s of steps) {
+    if (!s.content || !QUOTA_SCAN_TYPES.has(s.type)) continue;
+    const scanText = s.content.split("Using prompt:")[0];
+    const hit = detectLocationError(scanText);
+    if (hit) return hit;
+  }
+  return null;
+}

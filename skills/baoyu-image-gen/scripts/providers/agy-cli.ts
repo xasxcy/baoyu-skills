@@ -133,6 +133,17 @@ export function buildWrapperError(parsed: WrapperErrorResult): Error {
   ) {
     return new Error(`agy-cli rate limited (${detail}`);
   }
+  // Google's geo/ASN gate on the model call. Not a quota pool and not
+  // request-dependent — retrying (here or via the outer cooldown) from the
+  // same egress only wastes cold-starts. The "Invalid " prefix keeps
+  // main.ts's isRetryableGenerationError from retrying; the message spells
+  // out the only real fix.
+  if (parsed.error_kind === "location_not_supported") {
+    return new Error(
+      `Invalid agy-cli result (${detail} — agy's model endpoint rejected this egress region/IP. ` +
+        `Route agy through a supported region (ideally a residential/ISP IP, not a datacenter range) and retry.`,
+    );
+  }
   return new Error(`Invalid agy-cli result (${detail}`);
 }
 

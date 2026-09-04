@@ -5,9 +5,11 @@ import {
   extractSavedImagePath,
   hasGenerateImageInvocation,
   detectQuotaError,
+  detectLocationError,
+  detectLocationErrorInSteps,
   type TranscriptStep,
 } from "./parser.ts";
-import { readTranscript, brainDir } from "./spawn.ts";
+import { readTranscript, brainDir, readServerLogForConversation } from "./spawn.ts";
 
 const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff]);
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -27,9 +29,12 @@ const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function assertSafeConversationId(conversationId: string): void {
   if (!SAFE_CONVERSATION_ID_RE.test(conversationId) || conversationId === "." || conversationId === "..") {
+    // Force retryable:false — "agent_refused" is in RETRYABLE, but an unsafe
+    // id never becomes safe on a retry, so retrying only burns agy cold starts.
     throw new GenError(
       "agent_refused",
       `agy produced an unsafe conversation_id: ${conversationId}`,
+      false,
     );
   }
 }
@@ -69,12 +74,33 @@ export interface VerifiedGeneration {
   sourcePath: string;
 }
 
+// Google's geo/ASN gate on the model call leaves an empty transcript (just
+// USER_INPUT + a contentless PLANNER_RESPONSE) and a generic stdout error,
+// so it would otherwise be misread as a retryable no_image_gen_tool_use.
+// Check agy's own diagnostic channels — transcript steps first (fs-free,
+// forward hedge), then the per-invocation server log where the real
+// `FAILED_PRECONDITION ... User location is not supported` line actually
+// lands. Returns the matched line, or null.
+async function detectLocationGate(
+  conversationId: string,
+  steps: TranscriptStep[],
+  runStartedAtMs: number,
+): Promise<string | null> {
+  const fromSteps = detectLocationErrorInSteps(steps);
+  if (fromSteps) return fromSteps;
+  const serverLog = await readServerLogForConversation(conversationId, runStartedAtMs);
+  return serverLog ? detectLocationError(serverLog) : null;
+}
+
 // Real evidence that generate_image ran in THIS run: a GENERATE_IMAGE step
 // (or a generate_image tool_call) in this conversation's transcript, plus
 // the file it says it saved actually existing on disk. Trusting the
 // top-level JSON response text alone is not enough — the model could
 // describe success without having called the tool.
-export async function verifyGeneration(conversationId: string | null): Promise<VerifiedGeneration> {
+export async function verifyGeneration(
+  conversationId: string | null,
+  runStartedAtMs: number,
+): Promise<VerifiedGeneration> {
   if (!conversationId) {
     throw new GenError("agent_refused", "agy produced no conversation_id");
   }
@@ -91,6 +117,10 @@ export async function verifyGeneration(conversationId: string | null): Promise<V
     );
   }
   if (!hasGenerateImageInvocation(steps)) {
+    const geoMsg = await detectLocationGate(conversationId, steps, runStartedAtMs);
+    if (geoMsg) {
+      throw new GenError("location_not_supported", geoMsg);
+    }
     throw new GenError("no_image_gen_tool_use", `generate_image was not invoked in ${conversationId}`);
   }
 
@@ -128,6 +158,14 @@ export async function verifyGeneration(conversationId: string | null): Promise<V
   const quotaMsg = detectQuotaError(steps);
   if (quotaMsg) {
     throw new GenError("quota_exhausted", quotaMsg);
+  }
+
+  // Rare on this path (the gate usually aborts before generate_image is
+  // even attempted), but a mid-run gate flip would land here — keep the
+  // non-retryable classification rather than falling through to a retry.
+  const geoMsg = await detectLocationGate(conversationId, steps, runStartedAtMs);
+  if (geoMsg) {
+    throw new GenError("location_not_supported", geoMsg);
   }
 
   throw new GenError(

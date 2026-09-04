@@ -125,6 +125,22 @@ test("agy-cli buildWrapperError keeps other error_kinds non-retryable and preser
   assert.match(err.message, /agy exceeded 300000ms/);
 });
 
+test("agy-cli buildWrapperError keeps error_kind=location_not_supported non-retryable and spells out the egress fix", () => {
+  const err = buildWrapperError({
+    status: "error",
+    path: "",
+    bytes: 0,
+    error_kind: "location_not_supported",
+    error:
+      "agent executor error: calling model: FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+  });
+  // "Invalid " prefix → main.ts's isRetryableGenerationError treats it as non-retryable.
+  assert.match(err.message, /^Invalid agy-cli result \(location_not_supported\)/);
+  assert.doesNotMatch(err.message, /rate limited/);
+  assert.match(err.message, /supported region/);
+  assert.match(err.message, /User location is not supported/);
+});
+
 test("agy-cli buildWrapperError handles a missing error field without throwing", () => {
   const err = buildWrapperError({
     status: "error",

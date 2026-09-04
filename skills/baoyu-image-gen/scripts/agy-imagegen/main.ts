@@ -208,14 +208,18 @@ export async function resolveGenerationFromRun(
 ): Promise<{ bytes: number; conversationId: string | null; usage: AgyRunResult["usage"] }> {
   let sourcePath: string;
   try {
-    ({ sourcePath } = await verifyGeneration(run.conversationId));
+    ({ sourcePath } = await verifyGeneration(run.conversationId, run.startedAtMs));
     await verifySourceImage(sourcePath);
   } catch (verifyErr) {
-    // A quota/429 signal recovered from the transcript is more actionable
-    // than the generic agent_refused rewrite below — preserve the distinct
-    // kind even when agy's own status is non-SUCCESS (the usual case on a
-    // real quota hit).
-    if (verifyErr instanceof GenError && verifyErr.kind === "quota_exhausted") {
+    // A quota/429 signal — or Google's geo gate — recovered during
+    // verification is more actionable than the generic agent_refused
+    // rewrite below. Preserve the distinct kind even when agy's own status
+    // is non-SUCCESS (the usual case for both: a real quota hit, and the
+    // "Agent execution terminated due to error." the geo gate produces).
+    if (
+      verifyErr instanceof GenError &&
+      (verifyErr.kind === "quota_exhausted" || verifyErr.kind === "location_not_supported")
+    ) {
       throw verifyErr;
     }
     if (run.status !== "SUCCESS") {

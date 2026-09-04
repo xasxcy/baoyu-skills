@@ -133,3 +133,71 @@ export function extractSavedImagePath(steps: TranscriptStep[]): string | null {
   }
   return null;
 }
+
+// A genuine quota / 429 RESOURCE_EXHAUSTED from agy's upstream image backend
+// no longer reliably lands in the top-level stdout `status`/`error` fields —
+// agy now writes the diagnostic into a transcript step's `content` (observed
+// in the PLANNER_RESPONSE step that reports the tool failure, e.g.
+// "...当前模型的配额已耗尽（429 Resource Exhausted / QUOTA_EXHAUSTED）...").
+// Without this, that case degrades to a generic `no_image_gen_tool_use` and
+// the caller can't tell "back off / rotate key" from "prompt refined".
+const QUOTA_ERROR_RE = /RESOURCE_EXHAUSTED|QUOTA_EXHAUSTED|\b429\b|Resource Exhausted/i;
+
+// Only scan steps that carry agy's own diagnostics. A GENERIC step echoes the
+// caller's prompt back as "Using prompt: <text>" (buildInstruction embeds it),
+// so a prompt that merely mentions "429" there must not read as a rate limit;
+// USER_INPUT is the raw prompt for the same reason. PLANNER_RESPONSE is where
+// the observed quota failure lands; ERROR_MESSAGE is agy's dedicated error
+// channel (both are among the step types seen across real transcripts).
+const QUOTA_SCAN_TYPES = new Set(["PLANNER_RESPONSE", "ERROR_MESSAGE"]);
+
+export function detectQuotaError(steps: TranscriptStep[]): string | null {
+  for (const s of steps) {
+    if (!s.content || !QUOTA_SCAN_TYPES.has(s.type)) continue;
+    // Belt and suspenders: even in a scanned step, cut anything after a
+    // "Using prompt:" marker so an echoed prompt can't trip the match.
+    const scanText = s.content.split("Using prompt:")[0];
+    for (const line of scanText.split("\n")) {
+      if (QUOTA_ERROR_RE.test(line)) return line.trim();
+    }
+  }
+  return null;
+}
+
+// Google's geo/ASN gate on the model-call path. Real form, seen only in
+// agy's server log (`~/.gemini/antigravity-cli/log/cli-<ts>.log`), not in
+// the run's brain-dir transcript and not in the stdout JSON (whose
+// top-level `error` on this path is the generic "Agent execution
+// terminated due to error."):
+//   agent executor error: calling model: FAILED_PRECONDITION (code 400):
+//   User location is not supported for the API use.
+// The phrase is specific enough to match on its own; kept anchored to the
+// distinctive "for the API use" tail so a prompt that merely mentions
+// "location is not supported" can't trip it.
+const LOCATION_ERROR_RE = /user location is not supported for the API use/i;
+
+// Scan an arbitrary text blob (a server-log tail, or a transcript step's
+// content) line by line for the geo-gate signature. Returns the first
+// matching line, trimmed, or null. Pure + fs-free so it's unit-testable
+// without a real agy install.
+export function detectLocationError(text: string): string | null {
+  if (!text) return null;
+  for (const line of text.split("\n")) {
+    if (LOCATION_ERROR_RE.test(line)) return line.trim();
+  }
+  return null;
+}
+
+// Same gate, but reading agy's own transcript diagnostic channels — a
+// forward hedge in case agy starts surfacing it there like it now does for
+// quota. Same step-type allowlist and "Using prompt:" guard as
+// detectQuotaError so an echoed prompt can't trip it.
+export function detectLocationErrorInSteps(steps: TranscriptStep[]): string | null {
+  for (const s of steps) {
+    if (!s.content || !QUOTA_SCAN_TYPES.has(s.type)) continue;
+    const scanText = s.content.split("Using prompt:")[0];
+    const hit = detectLocationError(scanText);
+    if (hit) return hit;
+  }
+  return null;
+}

@@ -147,23 +147,21 @@ async function loadPrompt(opts: CliOptions): Promise<string> {
 
 function buildInstruction(prompt: string, opts: CliOptions): string {
   const refBlock = opts.refImages.length > 0
-    ? `\nREFERENCE IMAGES: pass these absolute paths as the ImagePaths argument (in this order): ${opts.refImages.map((p) => `"${p}"`).join(", ")}\n`
+    ? `\nReference image file paths to pass into the ImagePaths array parameter:\n${opts.refImages.map((p) => `- ${p}`).join("\n")}\n`
     : "";
-  return `You have an internal tool called generate_image. Call it EXACTLY ONCE, before doing anything else, with:
-- Prompt: the PROMPT below
-- AspectRatio: "${opts.aspect}"
-- ImageName: "agy_imagegen_output"
+  return `Please generate an image using your generate_image tool.
+
+Tool parameters:
+- Prompt: (use the PROMPT text below)
+- AspectRatio: ${opts.aspect}
+- ImageName: agy_imagegen_output
 ${refBlock}
+IMPORTANT: Pass ImagePaths as a string array of file paths. Pass AspectRatio as "${opts.aspect}".
+
 PROMPT:
 ${prompt}
 
-After the tool call completes, reply with only the word: OK
-
-HARD CONSTRAINTS:
-- Call generate_image exactly once. Do not call it again even if the result looks imperfect.
-- Do NOT use run_command, shell, or any file operation to copy, move, or inspect files.
-- Do NOT search the filesystem for pre-existing images.
-- Only generate_image produces the image; do not fabricate or describe a result without calling it.`;
+After calling generate_image, respond with: OK`;
 }
 
 // Only used when --cache-dir is set. Copies each ref to a private path we
@@ -210,9 +208,20 @@ export async function resolveGenerationFromRun(
 ): Promise<{ bytes: number; conversationId: string | null; usage: AgyRunResult["usage"] }> {
   let sourcePath: string;
   try {
-    ({ sourcePath } = await verifyGeneration(run.conversationId));
+    ({ sourcePath } = await verifyGeneration(run.conversationId, run.startedAtMs));
     await verifySourceImage(sourcePath);
   } catch (verifyErr) {
+    // A quota/429 signal — or Google's geo gate — recovered during
+    // verification is more actionable than the generic agent_refused
+    // rewrite below. Preserve the distinct kind even when agy's own status
+    // is non-SUCCESS (the usual case for both: a real quota hit, and the
+    // "Agent execution terminated due to error." the geo gate produces).
+    if (
+      verifyErr instanceof GenError &&
+      (verifyErr.kind === "quota_exhausted" || verifyErr.kind === "location_not_supported")
+    ) {
+      throw verifyErr;
+    }
     if (run.status !== "SUCCESS") {
       // Verification couldn't recover an actual saved image, and agy itself
       // reported non-SUCCESS — this is a real failure. Surface agy's own
