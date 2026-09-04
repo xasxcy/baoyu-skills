@@ -62,7 +62,9 @@ On failure:
 {"status":"error","path":"…","bytes":0,"error":"…","error_kind":"timeout"}
 ```
 
-`error_kind` values: `agy_not_installed`, `invalid_args`, `prompt_file_missing`, `spawn_failed`, `timeout`, `no_image_gen_tool_use`, `output_missing`, `invalid_jpeg`, `agent_refused`, `malformed_json`.
+`error_kind` values: `agy_not_installed`, `invalid_args`, `prompt_file_missing`, `spawn_failed`, `timeout`, `no_image_gen_tool_use`, `output_missing`, `invalid_jpeg`, `quota_exhausted`, `location_not_supported`, `agent_refused`, `malformed_json`.
+
+`location_not_supported` (non-retryable) is Google's geo/ASN gate on the model call (`FAILED_PRECONDITION (code 400): User location is not supported for the API use`). Route `agy` through a supported region — ideally a residential/ISP IP, not a datacenter range. See [docs/agy-imagegen-backend.md](../../docs/agy-imagegen-backend.md#error-kinds).
 
 ## Options
 
