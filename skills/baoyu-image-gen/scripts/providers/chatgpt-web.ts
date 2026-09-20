@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import type { CliArgs } from "../types";
 
 // Drives the ChatGPT web UI through `opencli chatgpt image`. The image is
@@ -19,6 +19,12 @@ const DEFAULT_TIMEOUT_MS = 240_000;
 const KILL_GRACE_MS = 30_000;
 // After SIGTERM, how long to wait before escalating to SIGKILL.
 const SIGKILL_AFTER_MS = 5_000;
+// The DataTransfer upload path pushes each file through one browser command as
+// base64; a 1.8 MB PNG failed ("sendCommand: max attempts exhausted") while a
+// 292 KB JPEG succeeded. There is no measured threshold in between, so every
+// reference is re-encoded unconditionally rather than guessing a cut-off.
+const REF_MAX_EDGE = 1536;
+const REF_JPEG_QUALITY = 85;
 // Conservative cap; the ChatGPT web composer accepts more, but this matches
 // the edit endpoint limit other CLI wrappers use and keeps identity refs few.
 export const MAX_REFERENCE_IMAGES = 5;
@@ -156,6 +162,136 @@ export function buildOpencliError(stdout: string, stderr: string, code: number):
 
 type SpawnResult = { stdout: string; stderr: string; code: number };
 
+async function assertJpegFile(file: string, converterName: string, input: string): Promise<void> {
+  const fail = (why: string) =>
+    new Error(`Invalid chatgpt-web reference image: ${converterName} produced no usable JPEG for ${input} (${why}).`);
+  let handle;
+  try {
+    handle = await open(file, "r");
+  } catch {
+    throw fail("no output file");
+  }
+  try {
+    // Structural sanity only (SOI at the start, EOI at the end): enough to catch
+    // a converter that exited 0 without finishing the file, without pulling in a
+    // decoder. Real sips/magick either complete or exit non-zero.
+    const { size } = await handle.stat();
+    const head = Buffer.alloc(3);
+    const tail = Buffer.alloc(2);
+    if (size < 8) throw fail("output is too small to be a JPEG");
+    await handle.read(head, 0, 3, 0);
+    await handle.read(tail, 0, 2, size - 2);
+    if (head[0] !== 0xff || head[1] !== 0xd8) throw fail("output is not a JPEG");
+    if (tail[0] !== 0xff || tail[1] !== 0xd9) throw fail("output looks truncated");
+  } finally {
+    await handle.close();
+  }
+}
+
+export const fsHooks = { mkdtemp };
+
+export type ImageConverter = { name: string; run: (input: string, output: string) => Promise<void> };
+
+function execFileAsync(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: 60_000 }, (err, _stdout, stderr) => {
+      if (err) reject(Object.assign(err, { stderr: String(stderr ?? "") }));
+      else resolve();
+    });
+  });
+}
+
+function execFileOutput(file: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { timeout: 60_000 }, (err, stdout, stderr) => {
+      if (err) reject(Object.assign(err, { stderr: String(stderr ?? "") }));
+      else resolve(String(stdout));
+    });
+  });
+}
+
+// `sips -Z` scales to fit the target, which would also enlarge small images
+// (adding interpolation blur), so only pass it when the source is larger.
+// sips prints the input path first and the metadata lines after it, so only
+// anchored, indented lines count and the last one wins; a path that merely
+// contains "pixelWidth: 999999" must not be able to forge the size.
+export function parseSipsDimensions(info: string): { width: number; height: number } | null {
+  const last = (key: string): number | null => {
+    const found = [...info.matchAll(new RegExp(`^[ \\t]+${key}:[ \\t]*(\\d+)[ \\t]*$`, "gm"))];
+    return found.length > 0 ? Number(found[found.length - 1]![1]) : null;
+  };
+  const width = last("pixelWidth");
+  const height = last("pixelHeight");
+  return width !== null && height !== null ? { width, height } : null;
+}
+
+async function sipsNeedsDownscale(input: string): Promise<boolean> {
+  const info = await execFileOutput("sips", ["-g", "pixelWidth", "-g", "pixelHeight", input]);
+  const dims = parseSipsDimensions(info);
+  // Unreadable dimensions: never risk an enlargement; the conversion itself will
+  // fail loudly if the file is not an image.
+  return dims !== null && Math.max(dims.width, dims.height) > REF_MAX_EDGE;
+}
+
+export const DEFAULT_CONVERTERS: ImageConverter[] = [
+  {
+    name: "sips",
+    run: async (input, output) => {
+      const args = ["-s", "format", "jpeg", "-s", "formatOptions", String(REF_JPEG_QUALITY)];
+      if (await sipsNeedsDownscale(input)) args.push("-Z", String(REF_MAX_EDGE));
+      await execFileAsync("sips", [...args, input, "--out", output]);
+    },
+  },
+  {
+    name: "magick",
+    // The trailing ">" makes ImageMagick shrink only, never enlarge.
+    run: (input, output) =>
+      execFileAsync("magick", [input, "-auto-orient", "-resize", `${REF_MAX_EDGE}x${REF_MAX_EDGE}>`, "-quality", String(REF_JPEG_QUALITY), output]),
+  },
+];
+
+// Re-encodes every reference into `dir` (never touching the caller's files).
+// A converter that is not installed (ENOENT) falls through to the next one; if
+// none is installed the originals are passed through with a warning. A
+// converter that runs but fails means the image itself is unusable.
+export async function normalizeReferences(
+  refs: string[],
+  dir: string,
+  converters: ImageConverter[] = DEFAULT_CONVERTERS,
+): Promise<string[]> {
+  if (refs.length === 0) return [];
+  const out: string[] = [];
+  for (const [index, ref] of refs.entries()) {
+    const input = path.resolve(ref);
+    const output = path.join(dir, `ref-${index + 1}.jpg`);
+    let converted = false;
+    for (const converter of converters) {
+      try {
+        await converter.run(input, output);
+        // sips exits 0 with only a warning when the input is missing or invalid,
+        // so a clean exit proves nothing: the output itself must be a real JPEG.
+        await assertJpegFile(output, converter.name, input);
+        converted = true;
+        break;
+      } catch (err) {
+        if ((err as Error).message?.startsWith("Invalid ")) throw err;
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        const detail = String((err as { stderr?: string }).stderr || (err as Error).message).trim().split(/\r?\n/)[0];
+        throw new Error(`Invalid chatgpt-web reference image: ${converter.name} could not re-encode ${input} (${detail}).`);
+      }
+    }
+    if (!converted) {
+      process.stderr.write(
+        `chatgpt-web: no image converter found (tried ${converters.map((c) => c.name).join(", ")}); uploading ${input} as-is, large files may fail to upload.\n`,
+      );
+      out.push(input);
+    } else {
+      out.push(output);
+    }
+  }
+  return out;
+}
+
 export function runOpencli(
   bin: string,
   cliArgs: string[],
@@ -225,10 +361,14 @@ export async function generateImage(
 
   const root = path.join(os.tmpdir(), "baoyu-image-gen-chatgpt-web");
   await mkdir(root, { recursive: true });
-  const outDir = await mkdtemp(path.join(root, "out-"));
+  const outDir = await fsHooks.mkdtemp(path.join(root, "out-"));
+  let refDir: string | null = null;
 
   try {
-    const cliArgs = buildOpencliArgs(prompt, args, outDir, {
+    // Allocated inside the try so a failure here still cleans up outDir.
+    refDir = await fsHooks.mkdtemp(path.join(root, "ref-"));
+    const referenceImages = await normalizeReferences(args.referenceImages, refDir);
+    const cliArgs = buildOpencliArgs(prompt, { ...args, referenceImages }, outDir, {
       profile: process.env.BAOYU_CHATGPT_WEB_PROFILE,
       timeoutMs,
     });
@@ -259,8 +399,11 @@ export async function generateImage(
     }
   } finally {
     // Cleanup failures must never mask the result or turn into a retryable error.
-    await rm(outDir, { recursive: true, force: true }).catch((err) => {
-      process.stderr.write(`chatgpt-web: could not remove temp dir ${outDir}: ${String(err)}\n`);
-    });
+    for (const dir of [outDir, refDir]) {
+      if (!dir) continue;
+      await rm(dir, { recursive: true, force: true }).catch((err) => {
+        process.stderr.write(`chatgpt-web: could not remove temp dir ${dir}: ${String(err)}\n`);
+      });
+    }
   }
 }

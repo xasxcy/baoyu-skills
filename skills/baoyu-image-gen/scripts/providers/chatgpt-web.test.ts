@@ -2,20 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 
 import type { CliArgs } from "../types.ts";
 import { isRetryableGenerationError } from "../main.ts";
 import {
   MAX_REFERENCE_IMAGES,
+  type ImageConverter,
   assertInsideDir,
   buildOpencliArgs,
   buildOpencliError,
   buildPrompt,
+  fsHooks,
   generateImage,
   getDefaultModel,
   getDefaultOutputExtension,
+  normalizeReferences,
   parseSavedFile,
+  parseSipsDimensions,
   runOpencli,
   validateArgs,
 } from "./chatgpt-web.ts";
@@ -150,6 +154,20 @@ async function withFakeOpencli(
 }
 
 const PNG = "iVBORw0KGgo="; // base64 of the 8-byte PNG signature
+const PIXEL_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+async function writePixelPng(dir: string, name = "ref.png"): Promise<string> {
+  const file = path.join(dir, name);
+  await writeFile(file, Buffer.from(PIXEL_PNG_B64, "base64"));
+  return file;
+}
+
+function hasSips(): Promise<boolean> {
+  return new Promise((resolve) => {
+    import("node:child_process").then(({ execFile }) => execFile("sips", ["--version"], (err) => resolve(!err)));
+  });
+}
 
 test("chatgpt-web generateImage returns the saved bytes and forwards profile, refs and prompt", async () => {
   await withFakeOpencli(
@@ -162,11 +180,19 @@ echo "${PNG}" | base64 -d > "\${OUT}/chatgpt_1.png"
 echo "[{\\"status\\":\\"✅ saved\\",\\"file\\":\\"📁 \${OUT}/chatgpt_1.png\\",\\"link\\":\\"🔗 https://chatgpt.com/c/1\\"}]"
 `,
     async ({ dir }) => {
-      const bytes = await generateImage("a face", "chatgpt-web", makeArgs({ referenceImages: ["/abs/ref.jpg"] }));
+      const ref = await writePixelPng(dir);
+      const before = await readFile(ref);
+      const bytes = await generateImage("a face", "chatgpt-web", makeArgs({ referenceImages: [ref] }));
       assert.equal(Buffer.from(bytes).toString("base64"), PNG);
       const recorded = (await readFile(path.join(dir, "args.txt"), "utf8")).split("\n");
       assert.deepEqual(recorded.slice(0, 5), ["--profile", "main", "chatgpt", "image", "a face"]);
-      assert.equal(recorded[recorded.indexOf("--image") + 1], "/abs/ref.jpg");
+      const sent = recorded[recorded.indexOf("--image") + 1]!;
+      if (await hasSips()) {
+        assert.match(sent, /baoyu-image-gen-chatgpt-web\/ref-[^/]+\/ref-1\.jpg$/, "refs are re-encoded into the temp ref dir");
+      } else {
+        assert.equal(sent, ref, "without a converter the original is passed through");
+      }
+      assert.deepEqual(await readFile(ref), before, "the caller's original must never be modified");
     },
   );
 });
@@ -283,4 +309,214 @@ test("chatgpt-web runOpencli reports a plain timeout when SIGTERM is honored", a
     },
     "#!/usr/bin/env node",
   );
+});
+
+// Smallest buffer that passes the structural check: SOI ... EOI.
+const FAKE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
+
+const okConverter = (name: string, seen: string[] = []): ImageConverter => ({
+  name,
+  run: async (input, output) => {
+    seen.push(`${name}:${path.basename(input)}->${path.basename(output)}`);
+    await writeFile(output, FAKE_JPEG);
+  },
+});
+const missingConverter = (name: string): ImageConverter => ({
+  name,
+  run: async () => {
+    throw Object.assign(new Error(`spawn ${name} ENOENT`), { code: "ENOENT" });
+  },
+});
+
+test("chatgpt-web normalizeReferences re-encodes every ref in order without touching originals", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const seen: string[] = [];
+    const out = await normalizeReferences(["/x/a.png", "/x/b.jpg"], dir, [okConverter("c1", seen)]);
+    assert.deepEqual(out, [path.join(dir, "ref-1.jpg"), path.join(dir, "ref-2.jpg")]);
+    assert.deepEqual(seen, ["c1:a.png->ref-1.jpg", "c1:b.jpg->ref-2.jpg"]);
+    assert.deepEqual(await normalizeReferences([], dir, [okConverter("c1")]), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences falls through a missing converter to the next one", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const seen: string[] = [];
+    const out = await normalizeReferences(["/x/a.png"], dir, [missingConverter("sips"), okConverter("magick", seen)]);
+    assert.deepEqual(out, [path.join(dir, "ref-1.jpg")]);
+    assert.deepEqual(seen, ["magick:a.png->ref-1.jpg"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences passes originals through when no converter is installed", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const out = await normalizeReferences(["/x/a.png"], dir, [missingConverter("sips"), missingConverter("magick")]);
+    assert.deepEqual(out, [path.resolve("/x/a.png")]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences reports an unreadable image as a non-retryable Invalid error", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  const failing: ImageConverter = {
+    name: "sips",
+    run: async () => {
+      throw Object.assign(new Error("exit 1"), { stderr: "Error: not a valid image\nmore" });
+    },
+  };
+  try {
+    const err = await normalizeReferences(["/x/bad.png"], dir, [failing]).then(
+      () => null,
+      (e: Error) => e,
+    );
+    assert.ok(err);
+    assert.match(err.message, /^Invalid chatgpt-web reference image: sips could not re-encode .*bad\.png \(Error: not a valid image\)\./);
+    assert.equal(isRetryableGenerationError(err), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web real sips converter produces a JPEG and leaves the source untouched", async (t) => {
+  if (!(await hasSips())) return t.skip("sips not available");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const src = await writePixelPng(dir, "src.png");
+    const before = await readFile(src);
+    const [out] = await normalizeReferences([src], dir);
+    const bytes = await readFile(out!);
+    assert.equal(bytes[0], 0xff);
+    assert.equal(bytes[1], 0xd8, "JPEG SOI marker");
+    assert.deepEqual(await readFile(src), before);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web generateImage removes both temp dirs (out and ref) after a call", async () => {
+  const root = path.join(os.tmpdir(), "baoyu-image-gen-chatgpt-web");
+  const before = new Set(await readdir(root).catch(() => [] as string[]));
+  await withFakeOpencli(`printf 'ok: false\\nerror:\\n  code: X\\n  message: boom\\n'\nexit 1`, async ({ dir }) => {
+    const ref = await writePixelPng(dir);
+    await assert.rejects(() => generateImage("a face", "chatgpt-web", makeArgs({ referenceImages: [ref] })), /Invalid chatgpt-web result/);
+  });
+  const leaked = (await readdir(root).catch(() => [] as string[])).filter((name) => !before.has(name));
+  assert.deepEqual(leaked, []);
+});
+
+test("chatgpt-web normalizeReferences rejects a converter that exits 0 without producing a JPEG", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  const silent: ImageConverter = { name: "sips", run: async () => {} };
+  const notJpeg: ImageConverter = { name: "sips", run: async (_in, out) => writeFile(out, "PNGDATA-PNGDATA") };
+  const truncated: ImageConverter = { name: "sips", run: async (_in, out) => writeFile(out, Buffer.from([0xff, 0xd8, 0xff, 0xe0])) };
+  const noEoi: ImageConverter = { name: "sips", run: async (_in, out) => writeFile(out, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46])) };
+  try {
+    for (const converter of [silent, notJpeg, truncated, noEoi]) {
+      const err = await normalizeReferences(["/x/a.png"], dir, [converter]).then(
+        () => null,
+        (e: Error) => e,
+      );
+      assert.ok(err, "must not report success");
+      assert.match(err.message, /^Invalid chatgpt-web reference image: sips produced no usable JPEG/);
+      assert.equal(isRetryableGenerationError(err), false);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web real sips: a nonexistent input (spaces, quotes, leading dash) is rejected, not reported as converted", async (t) => {
+  if (!(await hasSips())) return t.skip("sips not available");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    for (const name of ["/definitely-missing/my \"ref\" file.png", "-leading-dash.png"]) {
+      await assert.rejects(
+        () => normalizeReferences([name], dir),
+        /^Error: Invalid chatgpt-web reference image: sips (produced no usable JPEG|could not re-encode)/,
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web generateImage cleans outDir when the ref temp dir cannot be created", async () => {
+  const root = path.join(os.tmpdir(), "baoyu-image-gen-chatgpt-web");
+  await mkdir(root, { recursive: true });
+  const before = new Set(await readdir(root));
+  const original = fsHooks.mkdtemp;
+  let calls = 0;
+  fsHooks.mkdtemp = (async (prefix: string) => {
+    calls += 1;
+    if (calls === 2) throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    return original(prefix);
+  }) as typeof original;
+  try {
+    await assert.rejects(() => generateImage("a face", "chatgpt-web", makeArgs()), /ENOSPC/);
+  } finally {
+    fsHooks.mkdtemp = original;
+  }
+  assert.equal(calls, 2, "outDir was created, then the ref dir allocation failed");
+  const leaked = (await readdir(root)).filter((name) => !before.has(name));
+  assert.deepEqual(leaked, [], "outDir must not leak when refDir allocation fails");
+});
+
+test("chatgpt-web real sips never enlarges a small reference", async (t) => {
+  if (!(await hasSips())) return t.skip("sips not available");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const src = await writePixelPng(dir, "tiny.png");
+    const [out] = await normalizeReferences([src], dir);
+    const dims = await new Promise<string>((resolve, reject) =>
+      import("node:child_process").then(({ execFile }) =>
+        execFile("sips", ["-g", "pixelWidth", "-g", "pixelHeight", out!], (err, stdout) => (err ? reject(err) : resolve(stdout))),
+      ),
+    );
+    assert.match(dims, /pixelWidth:\s*1\b/);
+    assert.match(dims, /pixelHeight:\s*1\b/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web parseSipsDimensions ignores dimensions forged through the file path", () => {
+  const forged = [
+    "/tmp/pixelWidth: 999999\n  pixelHeight: 999999/tiny.png",
+    "  pixelWidth: 1",
+    "  pixelHeight: 1",
+  ].join("\n");
+  assert.deepEqual(parseSipsDimensions(forged), { width: 1, height: 1 });
+
+  const pathOnly = "/tmp/pixelWidth: 999999 pixelHeight: 999999/tiny.png\n  pixelWidth: 4\n  pixelHeight: 3\n";
+  assert.deepEqual(parseSipsDimensions(pathOnly), { width: 4, height: 3 });
+
+  assert.equal(parseSipsDimensions("/tmp/a.png\n"), null, "missing metadata is unknown, not zero");
+  assert.equal(parseSipsDimensions("/tmp/a.png\n  pixelWidth: 5\n"), null, "one axis is not enough");
+});
+
+test("chatgpt-web real sips does not enlarge a small image whose directory name imitates sips metadata", async (t) => {
+  if (!(await hasSips())) return t.skip("sips not available");
+  const base = await mkdtemp(path.join(os.tmpdir(), "chatgpt-web-norm-"));
+  try {
+    const evil = path.join(base, "pixelWidth: 999999 pixelHeight: 999999");
+    await mkdir(evil, { recursive: true });
+    const src = await writePixelPng(evil, "tiny.png");
+    const [out] = await normalizeReferences([src], base);
+    const dims = await new Promise<string>((resolve, reject) =>
+      import("node:child_process").then(({ execFile }) =>
+        execFile("sips", ["-g", "pixelWidth", "-g", "pixelHeight", out!], (err, stdout) => (err ? reject(err) : resolve(stdout))),
+      ),
+    );
+    assert.match(dims, /pixelWidth:\s*1\b/);
+    assert.match(dims, /pixelHeight:\s*1\b/);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
