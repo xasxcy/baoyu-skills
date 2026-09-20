@@ -123,14 +123,14 @@ When the user wants a person/object preserved from reference images:
 | `--image <path>` | Output image path (required in single-image mode) |
 | `--batchfile <path>` | JSON batch file for multi-image generation |
 | `--jobs <count>` | Worker count for batch mode (default: auto, max from config, built-in default 10) |
-| `--provider google\|vertex\|openai\|azure\|openrouter\|dashscope\|siliconflow\|zai\|minimax\|jimeng\|seedream\|replicate\|codex-cli\|agy-cli\|agnes` | Force provider (default: auto-detect; `codex-cli` and `agy-cli` are never auto-selected — must be pinned via CLI or EXTEND.md) |
+| `--provider google\|vertex\|openai\|azure\|openrouter\|dashscope\|siliconflow\|zai\|minimax\|jimeng\|seedream\|replicate\|codex-cli\|agy-cli\|chatgpt-web\|agnes` | Force provider (default: auto-detect; `codex-cli`, `agy-cli` and `chatgpt-web` are never auto-selected — must be pinned via CLI or EXTEND.md) |
 | `--model <id>`, `-m` | Model ID — see provider references for defaults and allowed values |
 | `--ar <ratio>` | Aspect ratio (`16:9`, `1:1`, `4:3`, …) |
 | `--size <WxH>` | Explicit size (e.g., `1024x1024`; for `gpt-image-2.5-*` and `gpt-image-2`, width/height must be multiples of 16, max edge 3840px, ratio no wider than 3:1) |
 | `--quality normal\|2k` | Quality preset (default: `2k`) |
 | `--imageSize 1K\|2K\|4K` | Image size for Google/OpenRouter (default: from quality) |
 | `--imageApiDialect openai-native\|ratio-metadata` | OpenAI-compatible endpoint dialect — use `ratio-metadata` for gateways that expect aspect-ratio `size` plus `metadata.resolution` |
-| `--ref <files...>` | Reference images. Supported by Google/Vertex multimodal, OpenAI GPT Image edits, Azure OpenAI edits (PNG/JPG only), OpenRouter multimodal models, Replicate supported families, MiniMax subject-reference, Seedream 5.0/4.5/4.0, DashScope `wan2.7-image*`, `qwen-image-2.0*`, and `qwen-image-edit*` (pin `--provider dashscope`), SiliconFlow `Qwen/Qwen-Image-Edit*` (pin `--provider siliconflow`), `codex-cli`, and `agy-cli` (up to 3 images; verified to hold character/subject consistency across generations — see `references/providers/agy-cli.md`). SiliconFlow accepts local files only in this release; DashScope supports local files and HTTP(S). `data:` and `oss://` references are rejected by the CLI. |
+| `--ref <files...>` | Reference images. Supported by Google/Vertex multimodal, OpenAI GPT Image edits, Azure OpenAI edits (PNG/JPG only), OpenRouter multimodal models, Replicate supported families, MiniMax subject-reference, Seedream 5.0/4.5/4.0, DashScope `wan2.7-image*`, `qwen-image-2.0*`, and `qwen-image-edit*` (pin `--provider dashscope`), SiliconFlow `Qwen/Qwen-Image-Edit*` (pin `--provider siliconflow`), `codex-cli`, and `agy-cli` (up to 3 images; verified to hold character/subject consistency across generations — see `references/providers/agy-cli.md`). `chatgpt-web` (up to 5 images attached through the ChatGPT web composer; state each image's role in the prompt — see `references/providers/chatgpt-web.md`). SiliconFlow accepts local files only in this release; DashScope supports local files and HTTP(S). `data:` and `oss://` references are rejected by the CLI. |
 | `--n <count>` | Number of images. Replicate requires `--n 1` (single-output save semantics) |
 | `--json` | JSON output |
 
@@ -173,6 +173,9 @@ When the user wants a person/object preserved from reference images:
 | `BAOYU_CODEX_IMAGEGEN_TIMEOUT_MS` | Per-attempt `codex exec` timeout for the `codex-cli` provider (default: 300000 ms) |
 | `BAOYU_CODEX_IMAGEGEN_RETRIES` | Wrapper-side retry attempts on retryable errors for the `codex-cli` provider (default: 2) |
 | `BAOYU_CODEX_IMAGEGEN_LOG_FILE` | Append JSONL diagnostic log for the `codex-cli` provider |
+| `BAOYU_CHATGPT_WEB_PROFILE` | opencli Browser Bridge profile alias (the Chrome profile logged into ChatGPT) for the `chatgpt-web` provider |
+| `BAOYU_CHATGPT_WEB_BIN` | opencli binary for the `chatgpt-web` provider (default: `opencli` on `PATH`) |
+| `BAOYU_CHATGPT_WEB_TIMEOUT_MS` | Per-attempt timeout for the `chatgpt-web` provider (default: 240000 ms) |
 | `BAOYU_AGY_IMAGEGEN_BIN` | Override the agy-imagegen wrapper path for the `agy-cli` provider (default: bundled `scripts/agy-imagegen/main.ts`; accepts `.ts` or legacy `.sh`/binary) |
 | `BAOYU_AGY_IMAGEGEN_CACHE_DIR` | Enable idempotency cache for the `agy-cli` provider (off by default) |
 | `BAOYU_AGY_IMAGEGEN_TIMEOUT_MS` | Per-attempt `agy` timeout for the `agy-cli` provider (default: 300000 ms) |
@@ -239,6 +242,7 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 | Replicate (nano-banana, Seedream, Wan) | `references/providers/replicate.md` |
 | Codex CLI (wraps bundled `scripts/codex-imagegen/`; Codex login, no `OPENAI_API_KEY`) | `references/providers/codex-cli.md` |
 | Antigravity CLI (wraps bundled `scripts/agy-imagegen/`; agy login, JPEG output, up to 3 refs) | `references/providers/agy-cli.md` |
+| ChatGPT Web via opencli (`opencli chatgpt image`; ChatGPT web image allowance, PNG output, up to 5 refs, no `--size`) | `references/providers/chatgpt-web.md` |
 | Agnes (agnes-image-2.5-flash, reference-image support) | `references/providers/agnes.md` |
 | Vertex AI multi-account/project pool (rotation, 429 failover) | `references/providers/vertex-pool.md` |
 
@@ -248,11 +252,12 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 
 0. `EXTEND.md` sets `default_provider: <name>` → use it for any request that doesn't pass `--provider`, no separate authorization needed (the profile config *is* the authorization). This is the sanctioned way to make `codex-cli` or `agy-cli` a default (see rules 5–6). State the provider actually used. **The default is sticky on failure:** if it errors, surface the error and stop — do **not** silently retry the request on a different provider. A different provider means the prompt and any reference images go to another external service and a different account/quota gets billed, which needs its own authorization. Switch only on an explicit `--provider` for the retry or the user confirming a specific alternative in-conversation; rules 1–4 do not run as an automatic fallback.
 1. `--ref` provided + no `--provider` + no `EXTEND.md` default → auto-select Google → OpenAI → Azure → OpenRouter → Replicate → Seedream → MiniMax → Agnes (MiniMax's subject reference is more specialized toward character/portrait consistency)
-2. `--provider` specified → use it (if `--ref`, must be google/openai/azure/openrouter/replicate/seedream/minimax/codex-cli/agy-cli/agnes)
+2. `--provider` specified → use it (if `--ref`, must be google/openai/azure/openrouter/replicate/seedream/minimax/codex-cli/agy-cli/chatgpt-web/agnes)
 3. Only one API key present → use that provider
 4. Multiple keys → default priority: Google → OpenAI → Azure → OpenRouter → DashScope → Z.AI → MiniMax → Replicate → Jimeng → Seedream → Agnes
 5. `codex-cli` is **never chosen by rules 1–4** — it requires `default_provider: codex-cli` in EXTEND.md (rule 0) or an explicit `--provider codex-cli`. It spawns `codex exec` via the bundled `scripts/codex-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Codex subscription (no `OPENAI_API_KEY`). Requires `codex` on `PATH` with an active `codex login`.
 6. `agy-cli` is **never chosen by rules 1–4** — it requires `default_provider: agy-cli` in EXTEND.md (rule 0) or an explicit `--provider agy-cli`. It spawns `agy -p ...` via the bundled `scripts/agy-imagegen/main.ts` TS entrypoint (run with `bun`) and uses the user's Antigravity subscription. Requires `agy` on `PATH` with an active login. Output is JPEG.
+7. `chatgpt-web` is **never chosen by rules 1–4** — it requires `default_provider: chatgpt-web` in EXTEND.md (rule 0) or an explicit `--provider chatgpt-web`. It spawns `opencli chatgpt image` (no bundled wrapper) against the ChatGPT web UI in the user's Chrome and uses the ChatGPT web image allowance (no API key, not the Codex pool). Requires `opencli` on `PATH` with the Browser Bridge connected to a Chrome profile logged into ChatGPT (set `BAOYU_CHATGPT_WEB_PROFILE` when several profiles are connected). Every failure is non-retryable by design; see `references/providers/chatgpt-web.md`.
 
 ## Quality Presets
 
