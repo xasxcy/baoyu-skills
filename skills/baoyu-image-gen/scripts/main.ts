@@ -78,6 +78,8 @@ export const DEFAULT_PROVIDER_RATE_LIMITS: Record<Provider, ProviderRateLimit> =
   azure: { concurrency: 3, startIntervalMs: 1100 },
   "codex-cli": { concurrency: 1, startIntervalMs: 2000 },
   "agy-cli": { concurrency: 1, startIntervalMs: 2000 },
+  // One shared browser session (site:chatgpt); parallel runs would collide.
+  "chatgpt-web": { concurrency: 1, startIntervalMs: 3000 },
   agnes: { concurrency: 3, startIntervalMs: 1100 },
   vertex: { concurrency: 1, startIntervalMs: 1500 },
 };
@@ -94,7 +96,7 @@ Options:
   --image <path>            Output image path (required in single-image mode)
   --batchfile <path>        JSON batch file for multi-image generation
   --jobs <count>            Worker count for batch mode (default: auto, max from config, built-in default 10)
-  --provider google|openai|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agy-cli|agnes|vertex  Force provider (auto-detect by default)
+  --provider google|openai|openrouter|dashscope|siliconflow|zai|minimax|replicate|jimeng|seedream|azure|codex-cli|agy-cli|chatgpt-web|agnes|vertex  Force provider (auto-detect by default)
   -m, --model <id>          Model ID
   --ar <ratio>              Aspect ratio (e.g., 16:9, 1:1, 4:3)
   --size <WxH>              Size (e.g., 1024x1024)
@@ -192,6 +194,9 @@ Environment variables:
   BAOYU_AGY_IMAGEGEN_CACHE_DIR  Enable idempotency cache for agy-cli provider (default: disabled)
   BAOYU_AGY_IMAGEGEN_TIMEOUT_MS  Per-attempt agy timeout for agy-cli provider (default: 300000)
   BAOYU_AGY_IMAGEGEN_RETRIES  agy-side retry attempts on retryable errors (default: 2)
+  BAOYU_CHATGPT_WEB_PROFILE  opencli Browser Bridge profile alias for chatgpt-web provider (must be the profile logged into ChatGPT)
+  BAOYU_CHATGPT_WEB_BIN     opencli binary for chatgpt-web provider (default: opencli)
+  BAOYU_CHATGPT_WEB_TIMEOUT_MS  Per-attempt timeout for chatgpt-web provider (default: 240000)
   BAOYU_AGY_IMAGEGEN_LOG_FILE  Append JSONL diagnostic log for agy-cli provider
 
 Env file load order: CLI args > EXTEND.md > process.env > <cwd>/.baoyu-skills/.env > ~/.baoyu-skills/.env`);
@@ -475,6 +480,7 @@ export function parseSimpleYaml(yaml: string): Partial<ExtendConfig> {
           azure: null,
           "codex-cli": null,
           "agy-cli": null,
+          "chatgpt-web": null,
           agnes: null,
           vertex: null,
         };
@@ -747,6 +753,7 @@ export function detectProvider(args: CliArgs): Provider {
     args.provider !== "siliconflow" &&
     args.provider !== "codex-cli" &&
     args.provider !== "agy-cli" &&
+    args.provider !== "chatgpt-web" &&
     args.provider !== "agnes" &&
     args.provider !== "vertex"
   ) {
@@ -919,6 +926,7 @@ async function loadProviderModule(provider: Provider): Promise<ProviderModule> {
   if (provider === "azure") return (await import("./providers/azure")) as ProviderModule;
   if (provider === "codex-cli") return (await import("./providers/codex-cli")) as ProviderModule;
   if (provider === "agy-cli") return (await import("./providers/agy-cli")) as ProviderModule;
+  if (provider === "chatgpt-web") return (await import("./providers/chatgpt-web")) as ProviderModule;
   if (provider === "agnes") return (await import("./providers/agnes")) as ProviderModule;
   return (await import("./providers/openai")) as ProviderModule;
 }
@@ -955,6 +963,7 @@ export function getModelForProvider(
     if (provider === "azure" && extendConfig.default_model.azure) return extendConfig.default_model.azure;
     if (provider === "codex-cli" && extendConfig.default_model["codex-cli"]) return extendConfig.default_model["codex-cli"];
     if (provider === "agy-cli" && extendConfig.default_model["agy-cli"]) return extendConfig.default_model["agy-cli"];
+    if (provider === "chatgpt-web" && extendConfig.default_model["chatgpt-web"]) return extendConfig.default_model["chatgpt-web"];
     if (provider === "agnes" && extendConfig.default_model.agnes) return extendConfig.default_model.agnes;
   }
   if (provider === "vertex" && process.env.VERTEX_IMAGE_MODEL) {

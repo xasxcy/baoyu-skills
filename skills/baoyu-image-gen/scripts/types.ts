@@ -23,6 +23,7 @@ export const PROVIDERS = [
   "azure",
   "codex-cli",
   "agy-cli",
+  "chatgpt-web",
   "agnes",
   "vertex",
 ] as const;
@@ -99,6 +100,7 @@ export type ExtendConfig = {
     azure: string | null;
     "codex-cli": string | null;
     "agy-cli": string | null;
+    "chatgpt-web": string | null;
     agnes: string | null;
     vertex: string | null;
   };
