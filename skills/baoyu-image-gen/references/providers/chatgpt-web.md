@@ -25,7 +25,7 @@ If more than one Chrome profile is connected, set `BAOYU_CHATGPT_WEB_PROFILE=<al
 |------|----------|
 | `--prompt <text>` / `--promptfiles <files>` | Required. Sent as the ChatGPT message. A prompt starting with `-` is prefixed with a newline so opencli does not read it as a flag. |
 | `--image <path>` | Required. Output is PNG bytes; keep a `.png` extension. |
-| `--ref <files...>` | Attached in the given order via `opencli --image a,b,c`, max 5. State each reference's role in the prompt ("image 1 is the primary face..."). |
+| `--ref <files...>` | Attached in the given order via `opencli --image a,b,c`, max 5. State each reference's role in the prompt ("image 1 is the primary face..."). Every reference is first re-encoded to JPEG (quality 85, longest edge 1536 px) into a private temp dir with `sips` (macOS) or ImageMagick `magick`; your original files are never modified. If neither converter is installed the originals are uploaded as-is with a warning, and large files may fail to upload. Transparency is flattened by the converter. |
 | `--ar <ratio>` | No native flag; appended to the prompt as `Aspect ratio: <ratio>.` (a hint the model may or may not honor exactly). |
 | `--n` | Must be `1`. |
 | `--size` | Rejected: the web UI picks the canvas. |
@@ -52,6 +52,7 @@ Every failure is thrown as `Invalid chatgpt-web result (exit <n>, <CODE>): <mess
 | `COMMAND_EXEC` | Upload, send or download step failed (message says which) | Read the message; see Troubleshooting. |
 | `UNKNOWN` | e.g. "Browser connection dropped after the navigate command was dispatched; it may have completed" | Look in `opencli chatgpt history` first. |
 | `Invalid chatgpt-web setup` | `opencli` not found | Install `@jackwener/opencli` or set `BAOYU_CHATGPT_WEB_BIN`. |
+| `Invalid chatgpt-web reference image` | A reference could not be re-encoded to a real JPEG (missing file, not an image). `sips` exits 0 with only a warning in that case, so the output file itself is verified. | Fix or replace the reference; nothing was sent to ChatGPT. |
 
 ## Troubleshooting
 
@@ -64,6 +65,10 @@ Every failure is thrown as `Invalid chatgpt-web result (exit <n>, <CODE>): <mess
 ```
 
 This is a local patch to a global npm package: an `npm i -g @jackwener/opencli` upgrade overwrites it, so re-apply after upgrading (or check that the upstream adapter no longer needs it). Text-only generation is unaffected.
+
+**Large reference images fail to upload** (`sendCommand: max attempts exhausted`). The `DataTransfer` path sends each file through one browser command as base64: a 1.8 MB PNG failed while a 292 KB JPEG worked. The provider therefore re-encodes every reference to a JPEG of roughly 300 KB before uploading, with no size threshold because none was measured. Only relevant if you call `opencli chatgpt image --image` directly: convert large files yourself first.
+
+**`Browser connection dropped after the navigate command was dispatched`.** Seen twice, both before the prompt was submitted, but opencli cannot tell. The provider never retries it. Check `opencli --profile <alias> chatgpt history` for a new conversation before rerunning by hand.
 
 **Two Chrome profiles connected and `opencli doctor` reports a connectivity failure.** Pass `--profile` (this provider does it for you when `BAOYU_CHATGPT_WEB_PROFILE` is set) or run `opencli profile use <alias>`.
 
