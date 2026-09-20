@@ -33,7 +33,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist && bun build ./src/cli.ts --target bun --outfile ./dist/cli.js && chmod +x ./dist/cli.js",
+    "build": "rm -rf dist && bun build ./src/cli.ts --target bun --external jsdom --outfile ./dist/cli.js && chmod +x ./dist/cli.js",
     "check": "tsc --noEmit",
     "dev": "bun run ./src/cli.ts",
     "release": "changeset publish",
@@ -48,7 +48,7 @@
     "@mozilla/readability": "^0.6.0",
     "chrome-launcher": "^1.2.1",
     "defuddle": "^0.17.0",
-    "jsdom": "^29.0.2",
+    "jsdom": "^30.0.1",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
     "turndown": "^7.2.0",

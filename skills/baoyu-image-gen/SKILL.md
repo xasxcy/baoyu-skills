@@ -1,6 +1,6 @@
 ---
 name: baoyu-image-gen
-description: AI image generation with OpenAI GPT Image 2, Azure OpenAI, Google/Vertex, OpenRouter, DashScope, SiliconFlow Qwen, Z.AI GLM-Image, MiniMax, Jimeng, Seedream, Replicate and Agnes APIs. Supports text-to-image, reference images, aspect ratios, and batch generation from saved prompt files. Sequential by default; use batch parallel generation when the user already has multiple prompts or wants stable multi-image throughput. Use when user asks to generate, create, or draw images.
+description: AI image generation with OpenAI GPT Image 2.5, Azure OpenAI, Google/Vertex, OpenRouter, DashScope, SiliconFlow Qwen, Z.AI GLM-Image, MiniMax, Jimeng, Seedream, Replicate and Agnes APIs. Supports text-to-image, reference images, aspect ratios, and batch generation from saved prompt files. Sequential by default; use batch parallel generation when the user already has multiple prompts or wants stable multi-image throughput. Use when user asks to generate, create, or draw images.
 version: 2.2.1
 metadata:
   openclaw:
@@ -15,7 +15,7 @@ metadata:
 
 # Image Generation (AI SDK)
 
-Official API-based image generation. Supports OpenAI GPT Image 2, Azure OpenAI, Google/Vertex, OpenRouter, DashScope (阿里通义万象), SiliconFlow (硅基流动) Qwen Image, Z.AI GLM-Image, MiniMax, Jimeng (即梦), Seedream (豆包), Replicate and Agnes.
+Official API-based image generation. Supports OpenAI GPT Image 2.5, Azure OpenAI, Google/Vertex, OpenRouter, DashScope (阿里通义万象), SiliconFlow (硅基流动) Qwen Image, Z.AI GLM-Image, MiniMax, Jimeng (即梦), Seedream (豆包), Replicate and Agnes.
 
 ## User Input Tools
 
@@ -88,7 +88,7 @@ ${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider s
 ${BUN_X} {baseDir}/scripts/main.ts --prompt "Make the scene blue" --image out.png --provider siliconflow --model Qwen/Qwen-Image-Edit --ref source.png
 
 # OpenAI GPT Image 2
-${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider openai --model gpt-image-2
+${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider openai --model gpt-image-2.5-flare
 
 # Codex CLI (uses logged-in Codex subscription — no OPENAI_API_KEY required; requires `codex` on PATH)
 ${BUN_X} {baseDir}/scripts/main.ts --prompt "A cat" --image out.png --provider codex-cli --ar 16:9
@@ -126,7 +126,7 @@ When the user wants a person/object preserved from reference images:
 | `--provider google\|vertex\|openai\|azure\|openrouter\|dashscope\|siliconflow\|zai\|minimax\|jimeng\|seedream\|replicate\|codex-cli\|agy-cli\|agnes` | Force provider (default: auto-detect; `codex-cli` and `agy-cli` are never auto-selected — must be pinned via CLI or EXTEND.md) |
 | `--model <id>`, `-m` | Model ID — see provider references for defaults and allowed values |
 | `--ar <ratio>` | Aspect ratio (`16:9`, `1:1`, `4:3`, …) |
-| `--size <WxH>` | Explicit size (e.g., `1024x1024`; for `gpt-image-2`, width/height must be multiples of 16, max edge 3840px, ratio no wider than 3:1) |
+| `--size <WxH>` | Explicit size (e.g., `1024x1024`; for `gpt-image-2.5-*` and `gpt-image-2`, width/height must be multiples of 16, max edge 3840px, ratio no wider than 3:1) |
 | `--quality normal\|2k` | Quality preset (default: `2k`) |
 | `--imageSize 1K\|2K\|4K` | Image size for Google/OpenRouter (default: from quality) |
 | `--imageApiDialect openai-native\|ratio-metadata` | OpenAI-compatible endpoint dialect — use `ratio-metadata` for gateways that expect aspect-ratio `size` plus `metadata.resolution` |
@@ -183,7 +183,7 @@ When the user wants a person/object preserved from reference images:
 
 ### Codex/ChatGPT OAuth is not an OpenAI API key
 
-`--provider openai --model gpt-image-2` uses the standard OpenAI Images API (`/v1/images/generations` or `/v1/images/edits`) and requires `OPENAI_API_KEY`. A Codex or ChatGPT desktop login is a different entitlement and is not a drop-in replacement for `OPENAI_API_KEY`; do not paste a Codex OAuth token into `OPENAI_API_KEY` or only set `OPENAI_BASE_URL` to a Codex backend.
+`--provider openai --model gpt-image-2.5-flare` uses the standard OpenAI Images API (`/v1/images/generations` or `/v1/images/edits`) and requires `OPENAI_API_KEY`. A Codex or ChatGPT desktop login is a different entitlement and is not a drop-in replacement for `OPENAI_API_KEY`; do not paste a Codex OAuth token into `OPENAI_API_KEY` or only set `OPENAI_BASE_URL` to a Codex backend.
 
 If the user wants to use their Codex subscription / GPT Image 2 entitlement without an OpenAI API key, route through a Codex-native backend instead of this skill's `openai` provider:
 
@@ -202,9 +202,13 @@ Priority (highest → lowest) applies to every provider:
 3. Env var `<PROVIDER>_IMAGE_MODEL`
 4. Built-in default
 
-For OpenAI, the built-in default is `gpt-image-2`. `gpt-image-1.5`, `gpt-image-1`, and GPT Image snapshots remain selectable with `--model` or `OPENAI_IMAGE_MODEL`.
+For OpenAI, the built-in default is `gpt-image-2.5-flare` (fast, lowest latency). `gpt-image-2.5-sunburst` is the most capable variant for complex scenes and precise edits; `gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, and dated GPT Image snapshots (e.g. `gpt-image-2.5-flare-2026-09-08`, `gpt-image-2-2026-04-21`) remain selectable with `--model` or `OPENAI_IMAGE_MODEL`.
 
-For Azure, `--model` / `default_model.azure` is the Azure deployment name. `AZURE_OPENAI_DEPLOYMENT` is the preferred env var; `AZURE_OPENAI_IMAGE_MODEL` is kept as a backward-compatible alias. If your Azure deployment is named after the underlying model, use `gpt-image-2`; otherwise use the exact custom deployment name.
+For Google, the built-in default is `gemini-3-pro-image`. `gemini-3.1-flash-image` is the faster low-cost option, and `gemini-3.1-flash-lite-image` is the cheapest — it only produces 1K output, so `--quality 2k` / `--imageSize 2K|4K` is clamped to 1K with a warning.
+
+For DashScope, the built-in default is `qwen-image-2.0-pro`; `qwen-image-3.0-pro` is the newest flagship and uses the same sizing rules.
+
+For Azure, `--model` / `default_model.azure` is the Azure deployment name. `AZURE_OPENAI_DEPLOYMENT` is the preferred env var; `AZURE_OPENAI_IMAGE_MODEL` is kept as a backward-compatible alias. If your Azure deployment is named after the underlying model, use `gpt-image-2.5-flare`; otherwise use the exact custom deployment name.
 
 EXTEND.md overrides env vars: if EXTEND.md sets `default_model.google: "gemini-3-pro-image"` and the env var sets `GOOGLE_IMAGE_MODEL=gemini-3.1-flash-image`, EXTEND.md wins.
 
@@ -235,7 +239,7 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 | Replicate (nano-banana, Seedream, Wan) | `references/providers/replicate.md` |
 | Codex CLI (wraps bundled `scripts/codex-imagegen/`; Codex login, no `OPENAI_API_KEY`) | `references/providers/codex-cli.md` |
 | Antigravity CLI (wraps bundled `scripts/agy-imagegen/`; agy login, JPEG output, up to 3 refs) | `references/providers/agy-cli.md` |
-| Agnes (agnes-image-2.1-flash, reference-image support) | `references/providers/agnes.md` |
+| Agnes (agnes-image-2.5-flash, reference-image support) | `references/providers/agnes.md` |
 | Vertex AI multi-account/project pool (rotation, 429 failover) | `references/providers/vertex-pool.md` |
 
 ## Provider Selection
@@ -259,14 +263,14 @@ Each provider has its own quirks (model families, size rules, ref support, limit
 
 Google/OpenRouter `imageSize` can be overridden with `--imageSize 1K|2K|4K`.
 
-For OpenAI native `gpt-image-2`, `normal` maps to `quality=medium` and a low-latency valid size near the requested aspect ratio; `2k` maps to `quality=high` and 2048px-class sizes such as `2048x2048`, `2048x1152`, or `1152x2048`. Use explicit `--size` for valid custom or 4K outputs, e.g. `3840x2160`.
+For OpenAI native `gpt-image-2.5-*` and `gpt-image-2`, `normal` maps to `quality=medium` and a low-latency valid size near the requested aspect ratio; `2k` maps to `quality=high` and 2048px-class sizes such as `2048x2048`, `2048x1152`, or `1152x2048`. Use explicit `--size` for valid custom or 4K outputs, e.g. `3840x2160`.
 
 ## Aspect Ratios
 
 Supported: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `2.35:1`.
 
 - Google multimodal: `imageConfig.aspectRatio`
-- OpenAI: `gpt-image-2` uses the closest valid custom size for the requested ratio; older GPT Image and DALL·E models use their closest supported fixed size
+- OpenAI: `gpt-image-2.5-*` and `gpt-image-2` use the closest valid custom size for the requested ratio; older GPT Image and DALL·E models use their closest supported fixed size
 - OpenRouter: `imageGenerationOptions.aspect_ratio`; if only `--size <WxH>` is given, the ratio is inferred
 - Replicate: behavior is model-specific — `google/nano-banana*` uses `aspect_ratio`, `bytedance/seedream-*` uses documented Replicate ratios, Wan 2.7 maps `--ar` to a concrete `size`
 - MiniMax: official `aspect_ratio` values; if `--size <WxH>` is given without `--ar`, sends `width`/`height` for `image-01`
@@ -315,7 +319,7 @@ If `--provider openai --model gpt-image-2` can't run because `OPENAI_API_KEY` is
 | `references/providers/minimax.md` | MiniMax image-01 + subject reference |
 | `references/providers/openrouter.md` | OpenRouter multimodal flow |
 | `references/providers/replicate.md` | Replicate supported families + guardrails |
-| `references/providers/agnes.md` | Agnes (agnes-image-2.1-flash) sizing, refs, and limits |
+| `references/providers/agnes.md` | Agnes (agnes-image-2.5-flash) sizing, refs, and limits |
 | `references/config/preferences-schema.md` | EXTEND.md schema |
 | `references/config/first-time-setup.md` | First-time setup flow |
 
