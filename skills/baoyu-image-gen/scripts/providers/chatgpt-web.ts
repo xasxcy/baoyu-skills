@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import type { CliArgs } from "../types";
 
 // Drives the ChatGPT web UI through `opencli chatgpt image`. The image is
@@ -23,8 +23,17 @@ const SIGKILL_AFTER_MS = 5_000;
 // base64; a 1.8 MB PNG failed ("sendCommand: max attempts exhausted") while a
 // 292 KB JPEG succeeded. There is no measured threshold in between, so every
 // reference is re-encoded unconditionally rather than guessing a cut-off.
-const REF_MAX_EDGE = 1536;
-const REF_JPEG_QUALITY = 85;
+// opencli's DataTransfer fallback sends every file base64-encoded inside ONE browser
+// command, so the limit is the TOTAL payload, not the file count: 4 refs at ~765 KB
+// total failed, ~515 KB total worked. Shrink all refs together until they fit.
+export const REF_TOTAL_BUDGET_BYTES = 500_000;
+export const REF_TIERS: ReadonlyArray<{ maxEdge: number; quality: number }> = [
+  { maxEdge: 1536, quality: 85 },
+  { maxEdge: 1280, quality: 80 },
+  { maxEdge: 1024, quality: 78 },
+  { maxEdge: 896, quality: 72 },
+  { maxEdge: 768, quality: 68 },
+];
 // Conservative cap; the ChatGPT web composer accepts more, but this matches
 // the edit endpoint limit other CLI wrappers use and keeps identity refs few.
 export const MAX_REFERENCE_IMAGES = 5;
@@ -190,7 +199,8 @@ async function assertJpegFile(file: string, converterName: string, input: string
 
 export const fsHooks = { mkdtemp };
 
-export type ImageConverter = { name: string; run: (input: string, output: string) => Promise<void> };
+export type ConvertTier = { maxEdge: number; quality: number };
+export type ImageConverter = { name: string; run: (input: string, output: string, tier: ConvertTier) => Promise<void> };
 
 function execFileAsync(file: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -225,28 +235,28 @@ export function parseSipsDimensions(info: string): { width: number; height: numb
   return width !== null && height !== null ? { width, height } : null;
 }
 
-async function sipsNeedsDownscale(input: string): Promise<boolean> {
+async function sipsNeedsDownscale(input: string, maxEdge: number): Promise<boolean> {
   const info = await execFileOutput("sips", ["-g", "pixelWidth", "-g", "pixelHeight", input]);
   const dims = parseSipsDimensions(info);
   // Unreadable dimensions: never risk an enlargement; the conversion itself will
   // fail loudly if the file is not an image.
-  return dims !== null && Math.max(dims.width, dims.height) > REF_MAX_EDGE;
+  return dims !== null && Math.max(dims.width, dims.height) > maxEdge;
 }
 
 export const DEFAULT_CONVERTERS: ImageConverter[] = [
   {
     name: "sips",
-    run: async (input, output) => {
-      const args = ["-s", "format", "jpeg", "-s", "formatOptions", String(REF_JPEG_QUALITY)];
-      if (await sipsNeedsDownscale(input)) args.push("-Z", String(REF_MAX_EDGE));
+    run: async (input, output, tier) => {
+      const args = ["-s", "format", "jpeg", "-s", "formatOptions", String(tier.quality)];
+      if (await sipsNeedsDownscale(input, tier.maxEdge)) args.push("-Z", String(tier.maxEdge));
       await execFileAsync("sips", [...args, input, "--out", output]);
     },
   },
   {
     name: "magick",
     // The trailing ">" makes ImageMagick shrink only, never enlarge.
-    run: (input, output) =>
-      execFileAsync("magick", [input, "-auto-orient", "-resize", `${REF_MAX_EDGE}x${REF_MAX_EDGE}>`, "-quality", String(REF_JPEG_QUALITY), output]),
+    run: (input, output, tier) =>
+      execFileAsync("magick", [input, "-auto-orient", "-resize", `${tier.maxEdge}x${tier.maxEdge}>`, "-quality", String(tier.quality), output]),
   },
 ];
 
@@ -258,35 +268,48 @@ export async function normalizeReferences(
   refs: string[],
   dir: string,
   converters: ImageConverter[] = DEFAULT_CONVERTERS,
+  tiers: ReadonlyArray<ConvertTier> = REF_TIERS,
+  budgetBytes: number = REF_TOTAL_BUDGET_BYTES,
 ): Promise<string[]> {
   if (refs.length === 0) return [];
-  const out: string[] = [];
-  for (const [index, ref] of refs.entries()) {
-    const input = path.resolve(ref);
-    const output = path.join(dir, `ref-${index + 1}.jpg`);
-    let converted = false;
-    for (const converter of converters) {
-      try {
-        await converter.run(input, output);
-        // sips exits 0 with only a warning when the input is missing or invalid,
-        // so a clean exit proves nothing: the output itself must be a real JPEG.
-        await assertJpegFile(output, converter.name, input);
-        converted = true;
-        break;
-      } catch (err) {
-        if ((err as Error).message?.startsWith("Invalid ")) throw err;
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-        const detail = String((err as { stderr?: string }).stderr || (err as Error).message).trim().split(/\r?\n/)[0];
-        throw new Error(`Invalid chatgpt-web reference image: ${converter.name} could not re-encode ${input} (${detail}).`);
+  let out: string[] = [];
+  for (const [tierIndex, tier] of tiers.entries()) {
+    out = [];
+    let total = 0;
+    let passthrough = false;
+    for (const [index, ref] of refs.entries()) {
+      const input = path.resolve(ref);
+      const output = path.join(dir, `ref-${index + 1}.jpg`);
+      let converted = false;
+      for (const converter of converters) {
+        try {
+          await converter.run(input, output, tier);
+          // sips exits 0 with only a warning when the input is missing or invalid,
+          // so a clean exit proves nothing: the output itself must be a real JPEG.
+          await assertJpegFile(output, converter.name, input);
+          converted = true;
+          break;
+        } catch (err) {
+          if ((err as Error).message?.startsWith("Invalid ")) throw err;
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+          const detail = String((err as { stderr?: string }).stderr || (err as Error).message).trim().split(/\r?\n/)[0];
+          throw new Error(`Invalid chatgpt-web reference image: ${converter.name} could not re-encode ${input} (${detail}).`);
+        }
+      }
+      if (!converted) {
+        process.stderr.write(
+          `chatgpt-web: no image converter found (tried ${converters.map((c) => c.name).join(", ")}); uploading ${input} as-is, large files may fail to upload.\n`,
+        );
+        out.push(input);
+        passthrough = true;
+      } else {
+        out.push(output);
+        total += (await stat(output)).size;
       }
     }
-    if (!converted) {
-      process.stderr.write(
-        `chatgpt-web: no image converter found (tried ${converters.map((c) => c.name).join(", ")}); uploading ${input} as-is, large files may fail to upload.\n`,
-      );
-      out.push(input);
-    } else {
-      out.push(output);
+    if (passthrough || total <= budgetBytes) return out;
+    if (tierIndex === tiers.length - 1) {
+      process.stderr.write(`chatgpt-web: references still total ${total} bytes at the smallest setting (budget ${budgetBytes}); the upload may fail.\n`);
     }
   }
   return out;

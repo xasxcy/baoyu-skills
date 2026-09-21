@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 
 import type { CliArgs } from "../types.ts";
 import { isRetryableGenerationError } from "../main.ts";
@@ -336,6 +336,39 @@ test("chatgpt-web normalizeReferences re-encodes every ref in order without touc
     assert.deepEqual(out, [path.join(dir, "ref-1.jpg"), path.join(dir, "ref-2.jpg")]);
     assert.deepEqual(seen, ["c1:a.png->ref-1.jpg", "c1:b.jpg->ref-2.jpg"]);
     assert.deepEqual(await normalizeReferences([], dir, [okConverter("c1")]), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences shrinks all refs together until the total fits the budget", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cw-budget-"));
+  try {
+    const tiersSeen: number[] = [];
+    // Each ref is 300 bytes at maxEdge 1000, 100 bytes at maxEdge 500.
+    const converter: ImageConverter = {
+      name: "sized",
+      run: async (_input, output, tier) => {
+        tiersSeen.push(tier.maxEdge);
+        await writeFile(output, Buffer.concat([FAKE_JPEG.subarray(0, 6), Buffer.alloc(tier.maxEdge === 1000 ? 292 : 92), FAKE_JPEG.subarray(6)]));
+      },
+    };
+    const tiers = [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }];
+    const out = await normalizeReferences(["/x/a.png", "/x/b.png", "/x/c.png"], dir, [converter], tiers, 500);
+    assert.equal(out.length, 3);
+    assert.deepEqual(tiersSeen, [1000, 1000, 1000, 500, 500, 500]);
+    assert.ok((await stat(out[0]!)).size < 200);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences keeps the first tier when the total already fits", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cw-budget-"));
+  try {
+    const seen: string[] = [];
+    await normalizeReferences(["/x/a.png"], dir, [okConverter("c1", seen)], [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }], 500);
+    assert.equal(seen.length, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
