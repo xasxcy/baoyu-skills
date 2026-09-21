@@ -25,7 +25,7 @@ If more than one Chrome profile is connected, set `BAOYU_CHATGPT_WEB_PROFILE=<al
 |------|----------|
 | `--prompt <text>` / `--promptfiles <files>` | Required. Sent as the ChatGPT message. A prompt starting with `-` is prefixed with a newline so opencli does not read it as a flag. |
 | `--image <path>` | Required. Output is PNG bytes; keep a `.png` extension. |
-| `--ref <files...>` | Attached in the given order via `opencli --image a,b,c`, max 5. State each reference's role in the prompt ("image 1 is the primary face..."). Every reference is first re-encoded to JPEG (starts at quality 85 / longest edge 1536 px, and all refs are shrunk together through 1280/1024/896/768 px tiers until the total is at most 500 KB, see Troubleshooting) into a private temp dir with `sips` (macOS) or ImageMagick `magick`; your original files are never modified. If neither converter is installed the originals are uploaded as-is with a warning, and large files may fail to upload. Transparency is flattened by the converter. |
+| `--ref <files...>` | Attached in the given order via `opencli --image a,b,c`, max 5. State each reference's role in the prompt ("image 1 is the primary face..."). Every reference is first re-encoded to JPEG (starts at 2000 px / quality 90 and steps down through 1536/1280/1024/896/768 px until each file is at most 400 KB, see Troubleshooting) into a private temp dir with `sips` (macOS) or ImageMagick `magick`; your original files are never modified. If neither converter is installed the originals are uploaded as-is with a warning, and large files may fail to upload. Transparency is flattened by the converter. |
 | `--ar <ratio>` | No native flag; appended to the prompt as `Aspect ratio: <ratio>.` (a hint the model may or may not honor exactly). |
 | `--n` | Must be `1`. |
 | `--size` | Rejected: the web UI picks the canvas. |
@@ -39,6 +39,7 @@ If more than one Chrome profile is connected, set `BAOYU_CHATGPT_WEB_PROFILE=<al
 |----------|--------|
 | `BAOYU_CHATGPT_WEB_PROFILE` | opencli Browser Bridge profile alias (the profile logged into ChatGPT). Unset uses opencli's default profile. |
 | `BAOYU_CHATGPT_WEB_BIN` | opencli binary path. Default: `opencli` on `PATH`. |
+| `BAOYU_CHATGPT_WEB_REF_TOTAL_BYTES` | Optional cap on the total size of all references after re-encoding. Unset = only the 400 KB per-file budget applies. Set `500000` for stock (unpatched) opencli. |
 | `BAOYU_CHATGPT_WEB_TIMEOUT_MS` | Per-attempt timeout in ms, passed to opencli as `--timeout` (seconds). Default `240000`. The process is killed 30 s after that. |
 | `BAOYU_IMAGE_GEN_CHATGPT_WEB_CONCURRENCY` | Batch concurrency. Default `1`; raising it makes runs collide on the single `site:chatgpt` session. |
 
@@ -66,7 +67,7 @@ Every failure is thrown as `Invalid chatgpt-web result (exit <n>, <CODE>): <mess
 
 This is a local patch to a global npm package: an `npm i -g @jackwener/opencli` upgrade overwrites it, so re-apply after upgrading (or check that the upstream adapter no longer needs it). Text-only generation is unaffected.
 
-**Large reference images fail to upload** (`sendCommand: max attempts exhausted`). The `DataTransfer` path sends each file through one browser command as base64: a 1.8 MB PNG failed while a 292 KB JPEG worked. The limit is on the **total** payload, not the file count: opencli sends all files base64-encoded inside one browser command. Observed: 4 refs totalling about 515 KB uploaded, about 765 KB failed. The provider therefore re-encodes every reference and shrinks them together until the total is at most 500 KB (`REF_TOTAL_BUDGET_BYTES`), so up to 5 refs work; a 4-ref set of 0.7-1.8 MB originals ends up around 450 KB. Only relevant if you call `opencli chatgpt image --image` directly: convert large files yourself first.
+**Large reference images fail to upload** (`sendCommand: max attempts exhausted`). The `DataTransfer` path sends each file through one browser command as base64: a 1.8 MB PNG failed while a 292 KB JPEG worked. Stock opencli sends all files base64-encoded inside **one** browser command, so the limit is the total (4 refs: about 515 KB ok, about 765 KB failed). Even one file of 0.75 MB or more fails. The recommended fix is the per-file upload patch (opencli branch `feat/chatgpt-upload-one-file-at-a-time`, also adds `fileChooserOpened` to the fallback whitelist): each file is its own command, and 4 refs of 190-350 KB (1.25 MB in total) uploaded fine. The provider therefore shrinks each reference to at most 400 KB (`REF_PER_FILE_BUDGET_BYTES`), up to 5 refs. On an unpatched opencli also set `BAOYU_CHATGPT_WEB_REF_TOTAL_BYTES=500000` so the total stays inside the old limit. Only relevant if you call `opencli chatgpt image --image` directly: convert large files yourself first.
 
 **`Browser connection dropped after the navigate command was dispatched`.** Seen twice, both before the prompt was submitted, but opencli cannot tell. The provider never retries it. Check `opencli --profile <alias> chatgpt history` for a new conversation before rerunning by hand.
 
