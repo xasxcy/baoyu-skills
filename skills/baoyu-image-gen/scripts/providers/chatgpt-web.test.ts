@@ -354,10 +354,34 @@ test("chatgpt-web normalizeReferences shrinks all refs together until the total 
       },
     };
     const tiers = [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }];
-    const out = await normalizeReferences(["/x/a.png", "/x/b.png", "/x/c.png"], dir, [converter], tiers, 500);
+    const out = await normalizeReferences(["/x/a.png", "/x/b.png", "/x/c.png"], dir, [converter], tiers, Infinity, 500);
     assert.equal(out.length, 3);
     assert.deepEqual(tiersSeen, [1000, 1000, 1000, 500, 500, 500]);
     assert.ok((await stat(out[0]!)).size < 200);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chatgpt-web normalizeReferences applies the per-file budget, not the total", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cw-perfile-"));
+  try {
+    const tiersSeen: number[] = [];
+    const converter: ImageConverter = {
+      name: "sized",
+      run: async (_input, output, tier) => {
+        tiersSeen.push(tier.maxEdge);
+        await writeFile(output, Buffer.concat([FAKE_JPEG.subarray(0, 6), Buffer.alloc(tier.maxEdge === 1000 ? 292 : 92), FAKE_JPEG.subarray(6)]));
+      },
+    };
+    const tiers = [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }];
+    // 3 files x 300 bytes = 900 total, each under a 400 per-file budget: no second tier.
+    await normalizeReferences(["/x/a.png", "/x/b.png", "/x/c.png"], dir, [converter], tiers, 400, Infinity);
+    assert.deepEqual(tiersSeen, [1000, 1000, 1000]);
+    // A 250-byte per-file budget forces the smaller tier.
+    tiersSeen.length = 0;
+    await normalizeReferences(["/x/a.png"], dir, [converter], tiers, 250, Infinity);
+    assert.deepEqual(tiersSeen, [1000, 500]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -367,7 +391,7 @@ test("chatgpt-web normalizeReferences keeps the first tier when the total alread
   const dir = await mkdtemp(path.join(os.tmpdir(), "cw-budget-"));
   try {
     const seen: string[] = [];
-    await normalizeReferences(["/x/a.png"], dir, [okConverter("c1", seen)], [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }], 500);
+    await normalizeReferences(["/x/a.png"], dir, [okConverter("c1", seen)], [{ maxEdge: 1000, quality: 85 }, { maxEdge: 500, quality: 70 }], 500, Infinity);
     assert.equal(seen.length, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });

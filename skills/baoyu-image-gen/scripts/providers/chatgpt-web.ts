@@ -23,11 +23,16 @@ const SIGKILL_AFTER_MS = 5_000;
 // base64; a 1.8 MB PNG failed ("sendCommand: max attempts exhausted") while a
 // 292 KB JPEG succeeded. There is no measured threshold in between, so every
 // reference is re-encoded unconditionally rather than guessing a cut-off.
-// opencli's DataTransfer fallback sends every file base64-encoded inside ONE browser
-// command, so the limit is the TOTAL payload, not the file count: 4 refs at ~765 KB
-// total failed, ~515 KB total worked. Shrink all refs together until they fit.
-export const REF_TOTAL_BUDGET_BYTES = 500_000;
+// opencli's DataTransfer fallback used to send every file inside ONE browser command, so
+// the limit was the TOTAL payload (4 refs: ~515 KB ok, ~765 KB failed). With the per-file
+// upload patch (opencli branch feat/chatgpt-upload-one-file-at-a-time) each file is its own
+// command and only the PER-FILE size matters: 190-350 KB files, 1.25 MB in total, uploaded
+// fine, while 0.75-0.85 MB files still failed. Shrink each ref until it fits the per-file
+// budget; set BAOYU_CHATGPT_WEB_REF_TOTAL_BYTES=500000 to also cap the total when running
+// an unpatched opencli.
+export const REF_PER_FILE_BUDGET_BYTES = 400_000;
 export const REF_TIERS: ReadonlyArray<{ maxEdge: number; quality: number }> = [
+  { maxEdge: 2000, quality: 90 },
   { maxEdge: 1536, quality: 85 },
   { maxEdge: 1280, quality: 80 },
   { maxEdge: 1024, quality: 78 },
@@ -269,13 +274,15 @@ export async function normalizeReferences(
   dir: string,
   converters: ImageConverter[] = DEFAULT_CONVERTERS,
   tiers: ReadonlyArray<ConvertTier> = REF_TIERS,
-  budgetBytes: number = REF_TOTAL_BUDGET_BYTES,
+  perFileBudget: number = REF_PER_FILE_BUDGET_BYTES,
+  totalBudget: number = Infinity,
 ): Promise<string[]> {
   if (refs.length === 0) return [];
   let out: string[] = [];
   for (const [tierIndex, tier] of tiers.entries()) {
     out = [];
     let total = 0;
+    let largest = 0;
     let passthrough = false;
     for (const [index, ref] of refs.entries()) {
       const input = path.resolve(ref);
@@ -304,15 +311,22 @@ export async function normalizeReferences(
         passthrough = true;
       } else {
         out.push(output);
-        total += (await stat(output)).size;
+        const size = (await stat(output)).size;
+        total += size;
+        largest = Math.max(largest, size);
       }
     }
-    if (passthrough || total <= budgetBytes) return out;
+    if (passthrough || (largest <= perFileBudget && total <= totalBudget)) return out;
     if (tierIndex === tiers.length - 1) {
-      process.stderr.write(`chatgpt-web: references still total ${total} bytes at the smallest setting (budget ${budgetBytes}); the upload may fail.\n`);
+      process.stderr.write(`chatgpt-web: references still exceed the upload budget at the smallest setting (largest ${largest} bytes, total ${total}); the upload may fail.\n`);
     }
   }
   return out;
+}
+
+function envTotalBudget(): number {
+  const n = Number(process.env.BAOYU_CHATGPT_WEB_REF_TOTAL_BYTES);
+  return Number.isFinite(n) && n > 0 ? n : Infinity;
 }
 
 export function runOpencli(
@@ -390,7 +404,7 @@ export async function generateImage(
   try {
     // Allocated inside the try so a failure here still cleans up outDir.
     refDir = await fsHooks.mkdtemp(path.join(root, "ref-"));
-    const referenceImages = await normalizeReferences(args.referenceImages, refDir);
+    const referenceImages = await normalizeReferences(args.referenceImages, refDir, DEFAULT_CONVERTERS, REF_TIERS, REF_PER_FILE_BUDGET_BYTES, envTotalBudget());
     const cliArgs = buildOpencliArgs(prompt, { ...args, referenceImages }, outDir, {
       profile: process.env.BAOYU_CHATGPT_WEB_PROFILE,
       timeoutMs,
