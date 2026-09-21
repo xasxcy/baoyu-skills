@@ -109,6 +109,16 @@ Without bun installed: `npx -y bun packages/baoyu-agy-imagegen/src/main.ts …`.
 
 Stdout emits a single JSON line: `{"status":"ok","path":...,"bytes":N,...}`. On failure, `{"status":"error","error_kind":...}`. Skills route here by setting `preferred_image_backend: agy-imagegen` in EXTEND.md, or by running `baoyu-image-gen --provider agy-cli` (which spawns the same wrapper internally). Full reference: [docs/agy-imagegen-backend.md](docs/agy-imagegen-backend.md).
 
+### `chatgpt-web` Provider (fork-only) and the local opencli patch
+
+`baoyu-image-gen --provider chatgpt-web` shells out to `opencli chatgpt image` (ChatGPT web, logged-in Chrome profile via `BAOYU_CHATGPT_WEB_PROFILE`). Details: `skills/baoyu-image-gen/references/providers/chatgpt-web.md`.
+
+**It depends on a local patch to the globally installed opencli that npm upgrades overwrite.** After every `npm i -g @jackwener/opencli`, re-apply and re-check:
+- File: `$(npm root -g)/@jackwener/opencli/clis/chatgpt/utils.js`, function `uploadChatGPTImages`.
+- Patch source: branch `feat/chatgpt-upload-one-file-at-a-time` in `~/GitRepositories/opencli` (commit `73cfc44` or later). It (a) adds `fileChooserOpened` to the fallback whitelist so the DataTransfer path is taken when the file-chooser event times out, and (b) uploads each file in its own browser command. Backup of the pre-patch file: `utils.js.bak-20260920`.
+- Symptoms when the patch is missing: `Failed to upload image ... fileChooserOpened not received`, or `sendCommand: max attempts exhausted` with several refs. Stock opencli only tolerates a small total payload; with a stock opencli set `BAOYU_CHATGPT_WEB_REF_TOTAL_BYTES=500000`.
+- Check upstream first (`opencli` releases, `chatgpt/utils.js`): if the fix landed there, drop the local patch.
+
 ## Release Process
 
 Use `/release-skills` workflow. Never skip:
